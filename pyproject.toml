@@ -1,0 +1,65 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spotlight-nlp"
+version = "0.2.0"
+description = "High-throughput SOTA NLP extraction library for FDA MAUDE narratives with IMDRF and MedDRA grounding."
+readme = "README.md"
+authors = [
+    { name = "Spotlight Contributors", email = "oss@spotlight-nlp.org" }
+]
+license = "Apache-2.0"
+requires-python = ">=3.10"
+keywords = [
+    "nlp",
+    "fda",
+    "maude",
+    "medical-devices",
+    "adverse-events",
+    "imdrf",
+    "meddra",
+    "information-extraction",
+    "clinical-nlp",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+    "Topic :: Text Processing :: Linguistic",
+]
+dependencies = [
+    "pydantic>=2.5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+llm = [
+    "requests>=2.28.0",
+]
+
+[project.scripts]
+spotlight = "spotlight.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/spotlight-nlp/spotlight"
+Repository = "https://github.com/spotlight-nlp/spotlight"
+Issues = "https://github.com/spotlight-nlp/spotlight/issues"
+Documentation = "https://github.com/spotlight-nlp/spotlight#readme"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
