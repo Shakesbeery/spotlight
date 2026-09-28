@@ -99,3 +99,4 @@ class MAUDEExtractionOutput(BaseModel):
     execution_path: ExecutionPath = Field(..., description="Model tier that processed this record")
     processing_time_ms: float = Field(..., ge=0.0, description="Latency in milliseconds")
     cleaned_narrative: str = Field(..., description="Narrative after boilerplate removal")
+    project_name: Optional[str] = Field(None, description="Optional name of project workspace owning this extraction")

@@ -504,9 +504,14 @@ class MDRDatabase:
                     num_clinical_interventions INTEGER,
                     num_other INTEGER,
                     cleaned_narrative TEXT,
-                    extracted_at TEXT
+                    extracted_at TEXT,
+                    project_name TEXT
                 )
             """)
+            try:
+                conn.execute("ALTER TABLE extracted_reports ADD COLUMN project_name TEXT")
+            except Exception:
+                pass
 
             # 5. Durable Extraction Storage: Extracted Findings
             conn.execute("""
@@ -1006,6 +1011,7 @@ class MDRDatabase:
                 len(out.other),
                 out.cleaned_narrative,
                 now_iso,
+                out.project_name or None,
             ))
 
             all_findings = (
@@ -1047,8 +1053,8 @@ class MDRDatabase:
                     execution_path, processing_time_ms,
                     num_operational_problems, num_manufacturing_issues,
                     num_adverse_events, num_clinical_interventions, num_other,
-                    cleaned_narrative, extracted_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cleaned_narrative, extracted_at, project_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, report_records)
 
             keys_to_clean = [(r[0],) for r in report_records]
@@ -1107,6 +1113,7 @@ class MDRDatabase:
         event_type: Optional[str] = None,
         category: Optional[Union[str, CategoryType]] = None,
         code: Optional[str] = None,
+        project_name: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> List[MAUDEExtractionOutput]:
         """
@@ -1118,6 +1125,7 @@ class MDRDatabase:
             event_type=event_type,
             category=category,
             code=code,
+            project_name=project_name,
             limit=limit,
         ))
 
@@ -1128,6 +1136,7 @@ class MDRDatabase:
         event_type: Optional[str] = None,
         category: Optional[Union[str, CategoryType]] = None,
         code: Optional[str] = None,
+        project_name: Optional[str] = None,
         limit: Optional[int] = None,
         chunk_size: int = 1000,
     ) -> Generator[MAUDEExtractionOutput, None, None]:
@@ -1151,13 +1160,18 @@ class MDRDatabase:
             where_clauses.append("LOWER(r.event_type) = ?")
             params.append(event_type.lower().strip())
 
+        if project_name:
+            where_clauses.append("r.project_name = ?")
+            params.append(project_name)
+
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
         limit_sql = f"LIMIT {limit}" if limit is not None else ""
 
         sql_reports = f"""
             SELECT
                 r.mdr_report_key, r.brand_name, r.product_code, r.event_type,
-                r.execution_path, r.processing_time_ms, r.cleaned_narrative
+                r.execution_path, r.processing_time_ms, r.cleaned_narrative,
+                r.project_name
             FROM extracted_reports r
             {where_sql}
             ORDER BY r.mdr_report_key
@@ -1244,7 +1258,7 @@ class MDRDatabase:
                     report_findings[f_mkey].append(finding)
 
                 for r_row in report_rows:
-                    mkey, brand, pcode, etype, exec_path, proc_time, cleaned = r_row
+                    mkey, brand, pcode, etype, exec_path, proc_time, cleaned, proj_name = r_row
                     findings = report_findings.get(mkey, [])
 
                     # Bucket findings
@@ -1271,6 +1285,7 @@ class MDRDatabase:
                         execution_path=ep_enum,
                         processing_time_ms=proc_time or 0.0,
                         cleaned_narrative=cleaned or "",
+                        project_name=proj_name or None,
                     )
                     count += 1
                     if limit is not None and count >= limit:

@@ -212,6 +212,60 @@ vdf = db.to_vigipy_df(product_code="GAG", target_level="code_term")
 container = db.to_vigipy_container(product_code="GAG", binary=True)
 ```
 
+### 6. Isolated Multi-Project Workspaces (`SpotlightProject`)
+For real-world postmarket research, researchers typically work on multiple clinical studies, indications, or device classes concurrently (e.g. coronary stents vs. surgical staplers). `SpotlightProject` provides isolated project workspaces that share a central, read-only raw MDR database while maintaining completely separate extraction stores, manifests, delta tracking, and exports.
+
+#### Workspace Structure
+```
+projects/
+└── surgical_staplers/
+    ├── project.json      # Metadata manifest, config, and audit trail of pipeline runs
+    ├── extractions.db    # Isolated durable extraction store (<50MB)
+    └── exports/          # Project-specific Parquet/CSV Vigipy datasets
+```
+
+#### Python API & Live Session Guardrails
+```python
+import spotlight
+from spotlight import SpotlightProject, ProjectMismatchError, ProjectActiveConflictError
+
+# 1. Initialize or open an isolated project workspace
+with SpotlightProject("surgical_staplers", raw_db="data/maude.db", description="Endocutter failure study") as proj:
+    print(f"Active Project: {proj.name} ({proj.project_dir})")
+
+    # 2. Run a project-scoped delta pipeline
+    # Queries shared raw MDR database and anti-joins strictly against THIS project's extractions
+    stats = proj.orchestrate_pipeline(
+        product_code="GAG",
+        event_type=None,
+        skip_already_extracted=True,  # Only processes delta records not yet in this project
+    )
+    print(f"Newly Extracted: {stats.newly_extracted:,} | Findings Saved: {stats.total_findings_saved:,}")
+
+    # 3. Compile project findings directly to Vigipy
+    vdf = proj.to_vigipy_df(target_level="code_term")
+    container = proj.to_vigipy_container(binary=True)
+    export_path = proj.export_vigipy_dataset("staplers.parquet")
+
+    # 4. Lookup raw MDR metadata on demand from any extracted finding
+    meta = proj.get_raw_metadata("12345678")
+    print(f"Manufacturer: {meta['manufacturer_name']} | Event: {meta['event_type']}")
+
+# Contamination Guard in live interactive sessions (e.g. Jupyter):
+p_balloons = SpotlightProject("balloon_catheters")
+p_staplers = SpotlightProject("surgical_staplers")
+
+# Extractions are automatically tagged with the active project:
+stapler_findings = spotlight.extract("Stapler misfired during resection.")
+
+# Attempting to save findings tagged for 'surgical_staplers' into 'balloon_catheters' raises:
+# ProjectMismatchError: Cross-project contamination prevented! Report belongs to 'surgical_staplers', but active project is 'balloon_catheters'.
+try:
+    p_balloons.save_extractions([stapler_findings])
+except ProjectMismatchError as e:
+    print("Contamination prevented!")
+```
+
 ---
 
 ## Command-Line Interface (CLI)
@@ -252,6 +306,25 @@ spotlight mdr query --product-code GAG --unextracted-only --db data/maude.db
 
 # Orchestrate streaming extraction & save to durable store (skipping previously processed)
 spotlight mdr extract --product-code GAG --event-type all --db data/maude.db
+```
+
+### Manage Isolated Project Workspaces (`spotlight project`)
+```bash
+# 1. Create a new study project workspace (links to shared raw database)
+spotlight project create surgical_staplers --raw-db data/maude.db --desc "Endocutter safety study"
+
+# 2. List all active project workspaces on disk
+spotlight project list
+
+# 3. Run streaming extraction pipeline strictly scoped to the project
+# Queries data/maude.db and anti-joins against projects/surgical_staplers/extractions.db
+spotlight project extract surgical_staplers --product-code GAG
+
+# 4. View project statistics and extracted finding breakdown
+spotlight project stats surgical_staplers
+
+# 5. Export compiled project findings to CSV or Parquet for Vigipy
+spotlight project export surgical_staplers -o staplers_vigipy.csv
 ```
 
 ### Check Installed Version

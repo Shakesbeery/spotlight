@@ -108,3 +108,70 @@ def test_cli_mdr_stats_and_query(tmp_path, capsys):
 
     db.close()
 
+
+def test_cli_project(tmp_path, capsys):
+    from spotlight.mdr_database import MDRDatabase
+    raw_db_file = tmp_path / "raw.db"
+    raw_db = MDRDatabase(db_path=str(raw_db_file))
+
+    # Ingest mock raw record
+    dev_txt = tmp_path / "dev.txt"
+    dev_txt.write_text("MDR_REPORT_KEY|BRAND_NAME|DEVICE_REPORT_PRODUCT_CODE\nK100|PacingLead|DTE\n", encoding="latin-1")
+    txt_txt = tmp_path / "txt.txt"
+    txt_txt.write_text("MDR_REPORT_KEY|TEXT_TYPE_CODE|FOI_TEXT\nK100|D|Lead fractured causing cardiac arrest.\n", encoding="latin-1")
+    mst_txt = tmp_path / "mst.txt"
+    mst_txt.write_text("MDR_REPORT_KEY|EVENT_TYPE\nK100|Injury\n", encoding="latin-1")
+
+    raw_db.ingest_txt(str(dev_txt), verbose=False)
+    raw_db.ingest_txt(str(txt_txt), verbose=False)
+    raw_db.ingest_txt(str(mst_txt), verbose=False)
+    raw_db.close()
+
+    base_dir = tmp_path / "projects"
+
+    # 1. Project create
+    with patch("sys.argv", [
+        "spotlight", "project", "create", "cardiac_study",
+        "--base-dir", str(base_dir),
+        "--raw-db", str(raw_db_file),
+        "--desc", "Cardiac pacing study",
+    ]):
+        main()
+    captured = capsys.readouterr()
+    assert "Project 'cardiac_study' ready." in captured.out
+
+    # 2. Project list
+    with patch("sys.argv", ["spotlight", "project", "list", "--base-dir", str(base_dir)]):
+        main()
+    captured = capsys.readouterr()
+    assert "cardiac_study" in captured.out
+
+    # 3. Project extract
+    with patch("sys.argv", [
+        "spotlight", "project", "extract", "cardiac_study",
+        "--base-dir", str(base_dir),
+        "--product-code", "DTE",
+    ]):
+        main()
+    captured = capsys.readouterr()
+    assert "SPOTLIGHT PROJECT PIPELINE: 'cardiac_study'" in captured.out
+    assert "Newly Extracted: 1" in captured.out
+
+    # 4. Project stats
+    with patch("sys.argv", ["spotlight", "project", "stats", "cardiac_study", "--base-dir", str(base_dir)]):
+        main()
+    captured = capsys.readouterr()
+    assert "Spotlight Project: cardiac_study" in captured.out
+    assert "Total Extracted Rpts: 1" in captured.out
+
+    # 5. Project export
+    with patch("sys.argv", [
+        "spotlight", "project", "export", "cardiac_study",
+        "--base-dir", str(base_dir),
+        "-o", "cardiac.csv",
+    ]):
+        main()
+    captured = capsys.readouterr()
+    assert "Exported Vigipy dataset to:" in captured.out
+    assert (base_dir / "cardiac_study" / "exports" / "cardiac.csv").exists()
+

@@ -185,6 +185,96 @@ def handle_mdr(args):
         db.close()
 
 
+def handle_project(args):
+    from spotlight.project import SpotlightProject
+
+    if not getattr(args, "proj_action", None):
+        print("Please specify a project action: list, create, stats, extract, export. Run 'spotlight project --help' for details.")
+        return
+
+    if args.proj_action == "list":
+        projects = SpotlightProject.list_projects(base_dir=args.base_dir)
+        if not projects:
+            print(f"No projects found in '{args.base_dir}'. Create one with 'spotlight project create <name>'.")
+            return
+        print(f"Spotlight Projects ({len(projects)} found in '{args.base_dir}'):")
+        print("-" * 80)
+        for p in projects:
+            print(f"  * {p['name']:<20} | Created: {p.get('created_at', '')[:10]} | Size: {p.get('size_mb', 0):.2f} MB | {p.get('description', '')}")
+        print("-" * 80)
+
+    elif args.proj_action == "create":
+        p = SpotlightProject(
+            name=args.name,
+            base_dir=args.base_dir,
+            description=args.description or "",
+            raw_db=args.raw_db,
+            exist_ok=True,
+        )
+        print(f"Project '{p.name}' ready.")
+        print(f"  Directory: {p.project_dir}")
+        print(f"  Raw DB:    {p.raw_db_path}")
+        print(f"  Store:     {p.extractions_db_path}")
+        p.close()
+
+    elif args.proj_action == "stats":
+        p = SpotlightProject.open(name=args.name, base_dir=args.base_dir)
+        try:
+            s = p.stats()
+            print(f"Spotlight Project: {s['name']}")
+            print(f"  Location:             {s['project_dir']}")
+            print(f"  Description:          {s['description']}")
+            print(f"  Created At:           {s['created_at']}")
+            print(f"  Shared Raw DB:        {s['raw_db_path']}")
+            print(f"  Extractions DB Size:  {s['extractions_db_size_mb']} MB")
+            print(f"  Total Extracted Rpts: {s['total_extracted_reports']:,}")
+            print(f"  Total Findings Saved: {s['total_findings_saved']:,}")
+            if s["findings_by_category"]:
+                print("  Findings by Category:")
+                for cat, cnt in s["findings_by_category"].items():
+                    print(f"    - {cat}: {cnt:,}")
+            if s["top_imdrf_codes"]:
+                print("  Top IMDRF Codes:")
+                for code_info in s["top_imdrf_codes"]:
+                    print(f"    - [{code_info['code']}] {code_info['term']}: {code_info['count']:,}")
+            if s["exports"]:
+                print(f"  Exported Datasets ({len(s['exports'])}):")
+                for exp in s["exports"]:
+                    print(f"    - {exp}")
+        finally:
+            p.close()
+
+    elif args.proj_action == "extract":
+        p = SpotlightProject.open(name=args.name, base_dir=args.base_dir)
+        try:
+            skip_already_extracted = not getattr(args, "force", False)
+            p.orchestrate_pipeline(
+                product_code=args.product_code,
+                brand_name=args.brand_name,
+                event_type=args.event_type,
+                query=args.query,
+                limit=args.limit,
+                chunk_size=args.chunk_size,
+                skip_already_extracted=skip_already_extracted,
+                verbose=True,
+            )
+        finally:
+            p.close()
+
+    elif args.proj_action == "export":
+        p = SpotlightProject.open(name=args.name, base_dir=args.base_dir)
+        try:
+            out_file = getattr(args, "output", "vigipy_dataset.csv")
+            dest = p.export_vigipy_dataset(
+                filename=out_file,
+                product_code=args.product_code,
+                brand_name=args.brand_name,
+            )
+            print(f"Exported Vigipy dataset to: {dest}")
+        finally:
+            p.close()
+
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -247,6 +337,46 @@ def main():
     p_mdr_extract.add_argument("--chunk-size", type=int, default=500, help="Batch size for streaming extraction & database commit")
     p_mdr_extract.add_argument("--force", action="store_true", help="Re-extract records even if previously extracted")
 
+    # Command: project
+    p_proj = subparsers.add_parser("project", help="Manage isolated user projects and scoped extraction spaces")
+    proj_sub = p_proj.add_subparsers(dest="proj_action", help="Project actions")
+
+    # project list
+    p_plist = proj_sub.add_parser("list", help="List all project workspaces")
+    p_plist.add_argument("--base-dir", default="projects", help="Base directory for projects")
+
+    # project create
+    p_pcreate = proj_sub.add_parser("create", help="Create or initialize a project workspace")
+    p_pcreate.add_argument("name", help="Name of the project")
+    p_pcreate.add_argument("--desc", dest="description", default="", help="Project description")
+    p_pcreate.add_argument("--base-dir", default="projects", help="Base directory for projects")
+    p_pcreate.add_argument("--raw-db", default="data/mdr.db", help="Path to shared raw MDR database")
+
+    # project stats
+    p_pstats = proj_sub.add_parser("stats", help="Display statistics for a project workspace")
+    p_pstats.add_argument("name", help="Name of the project")
+    p_pstats.add_argument("--base-dir", default="projects", help="Base directory for projects")
+
+    # project extract
+    p_pextract = proj_sub.add_parser("extract", help="Run streaming extraction scoped strictly to project workspace")
+    p_pextract.add_argument("name", help="Name of the project")
+    p_pextract.add_argument("--base-dir", default="projects", help="Base directory for projects")
+    p_pextract.add_argument("--product-code", default=None, help="FDA 3-letter product code (e.g. GAG)")
+    p_pextract.add_argument("--brand-name", default=None, help="Device brand name filter")
+    p_pextract.add_argument("--event-type", default=None, help="Event type (Malfunction, Injury, Death)")
+    p_pextract.add_argument("--query", default=None, help="Narrative text keyword search")
+    p_pextract.add_argument("--limit", type=int, default=None, help="Max records to extract")
+    p_pextract.add_argument("--chunk-size", type=int, default=500, help="Batch size for extraction & commit")
+    p_pextract.add_argument("--force", action="store_true", help="Re-extract records even if previously extracted in this project")
+
+    # project export
+    p_pexport = proj_sub.add_parser("export", help="Export project findings to CSV or Parquet in exports/")
+    p_pexport.add_argument("name", help="Name of the project")
+    p_pexport.add_argument("--base-dir", default="projects", help="Base directory for projects")
+    p_pexport.add_argument("-o", "--output", default="vigipy_dataset.csv", help="Output filename (.csv or .parquet)")
+    p_pexport.add_argument("--product-code", default=None, help="Optional product code filter")
+    p_pexport.add_argument("--brand-name", default=None, help="Optional brand name filter")
+
     # Command: version
     p_ver = subparsers.add_parser("version", help="Show installed Spotlight version")
 
@@ -263,6 +393,11 @@ def main():
             p_mdr.print_help()
         else:
             handle_mdr(args)
+    elif args.command == "project":
+        if not args.proj_action:
+            p_proj.print_help()
+        else:
+            handle_project(args)
     elif args.command == "version":
         handle_version(args)
     else:

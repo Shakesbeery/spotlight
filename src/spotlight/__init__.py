@@ -35,6 +35,13 @@ from spotlight.mdr_database import (
     MDROrchestrator,
     PipelineRunStats,
 )
+from spotlight.project import (
+    SpotlightProject,
+    ProjectError,
+    ProjectMismatchError,
+    ProjectNotFoundError,
+    ProjectActiveConflictError,
+)
 
 __version__ = "0.2.0"
 
@@ -138,4 +145,9 @@ __all__ = [
     "ExtractionStore",
     "MDROrchestrator",
     "PipelineRunStats",
+    "SpotlightProject",
+    "ProjectError",
+    "ProjectMismatchError",
+    "ProjectNotFoundError",
+    "ProjectActiveConflictError",
 ]

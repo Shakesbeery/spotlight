@@ -41,6 +41,32 @@ except ImportError:
 try:
     import vigipy
     _HAS_VIGIPY = True
+    # Ensure pandas 3.0 / pyarrow compatibility for vigipy contingency tables
+    try:
+        import vigipy.utils.data_prep as _vdp
+        import numpy as _np
+        _orig_cc = _vdp.compute_contingency
+
+        def _compat_compute_contingency(data_frame, product_label="name", count_label="count", ae_label="AE", margin_threshold=1):
+            data_cont = pd.pivot_table(
+                data_frame,
+                values=count_label,
+                index=product_label,
+                columns=ae_label,
+                aggfunc="sum",
+                fill_value=0,
+            )
+            cut_rows = _np.where(_np.sum(data_cont, axis=1) < margin_threshold)[0]
+            drop_rows = data_cont.index[cut_rows]
+            cut_cols = _np.where(_np.sum(data_cont, axis=0) < margin_threshold)[0]
+            drop_cols = data_cont.columns[cut_cols]
+            data_cont = data_cont.drop(drop_rows)
+            data_cont = data_cont.drop(drop_cols, axis=1)
+            return data_cont
+
+        _vdp.compute_contingency = _compat_compute_contingency
+    except Exception:
+        pass
 except ImportError:
     vigipy = None
     _HAS_VIGIPY = False
