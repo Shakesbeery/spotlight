@@ -118,8 +118,9 @@ def handle_mdr(args):
                     years = [int(y.strip()) for y in years.split(",")]
                 except ValueError:
                     pass
-            print(f"Syncing MDR flat files into {args.db} (years={years})...")
-            stats = db.sync(years=years, download_dir=args.download_dir, verbose=True)
+            force = getattr(args, "force", False)
+            print(f"Syncing MDR flat files into {args.db} (years={years}, force={force})...")
+            stats = db.sync(years=years, download_dir=args.download_dir, force=force, verbose=True)
             print("\nSync completed successfully! Current database stats:")
             print(json.dumps(stats, indent=2))
 
@@ -219,6 +220,7 @@ def main():
     p_sync.add_argument("--years", default="recent", help="Years to sync: 'recent', 'all', or comma-separated e.g. '2023,2024,2025'")
     p_sync.add_argument("--db", default="data/mdr.db", help="Path to SQLite database file")
     p_sync.add_argument("--download-dir", default="data/mdr_downloads", help="Directory for temporary archive downloads")
+    p_sync.add_argument("--force", action="store_true", help="Force re-download and re-ingest archives even if already cached")
 
     # mdr stats
     p_stats = mdr_sub.add_parser("stats", help="Display record counts and device statistics from database")

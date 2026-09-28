@@ -331,3 +331,28 @@ def test_orchestrate_pipeline_delta_deduplication():
         assert container is not None
 
         db.close()
+
+
+def test_sync_delta_skipping_already_ingested_files():
+    """Verifies that ingest_txt and sync skip files already downloaded and ingested."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test_sync_skip.db")
+        db = MDRDatabase(db_path=db_path)
+
+        dev_txt = os.path.join(tmpdir, "device2024.txt")
+        with open(dev_txt, "w", encoding="latin-1") as f:
+            f.write("MDR_REPORT_KEY|BRAND_NAME|DEVICE_REPORT_PRODUCT_CODE\n1|D1|GAG\n")
+
+        # First ingest: ingests 1 row
+        rows1 = db.ingest_txt(dev_txt, verbose=False)
+        assert rows1 == 1
+
+        # Second ingest with same file: should detect in mdr_sync_log and skip (0 rows)
+        rows2 = db.ingest_txt(dev_txt, force=False, verbose=False)
+        assert rows2 == 0
+
+        # Ingest with force=True: re-ingests
+        rows3 = db.ingest_txt(dev_txt, force=True, verbose=False)
+        assert rows3 == 1
+
+        db.close()

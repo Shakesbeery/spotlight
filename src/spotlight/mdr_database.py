@@ -240,11 +240,37 @@ class MDRDownloader:
         force: bool = False,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> str:
-        """Downloads a single file with optional progress reporting."""
+        """
+        Downloads a single file with delta checks:
+        - If file already exists locally and force=False:
+          * Historical annual files (e.g. device2023.zip) are immutable and skipped immediately.
+          * Current-year dynamic files (e.g. device.zip) check remote Content-Length via HTTP HEAD.
+            If identical, download is skipped.
+        """
         dest_path = os.path.join(self.zips_dir, dest_filename)
 
         if not force and os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-            return dest_path
+            # Check if this is a dynamic current-year file that could be updated by FDA
+            # Historical archives with 4-digit years (e.g. device2023.zip) never change once published.
+            is_dynamic = re.search(r"\d{4}", dest_filename) is None
+            if not is_dynamic:
+                return dest_path
+
+            # For dynamic files, perform a fast HEAD check to see if remote size changed
+            try:
+                head_req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent": "Spotlight-MDR-Downloader/1.0"},
+                    method="HEAD",
+                )
+                with urllib.request.urlopen(head_req, timeout=10) as head_resp:
+                    remote_len = int(head_resp.headers.get("Content-Length", 0))
+                    local_len = os.path.getsize(dest_path)
+                    if remote_len > 0 and remote_len == local_len:
+                        return dest_path
+            except Exception:
+                # If network check fails or server doesn't support HEAD, retain local file
+                return dest_path
 
         req = urllib.request.Request(
             url,
@@ -267,13 +293,19 @@ class MDRDownloader:
 
         return dest_path
 
-    def extract_zip(self, zip_path: str) -> List[str]:
-        """Extracts a ZIP archive into the extracted directory. Returns list of .txt files."""
+    def extract_zip(self, zip_path: str, force: bool = False) -> List[str]:
+        """
+        Extracts a ZIP archive into the extracted directory.
+        Skips re-extracting if target .txt already exists and force=False.
+        """
         extracted_files: List[str] = []
         with zipfile.ZipFile(zip_path, "r") as zf:
             for member in zf.namelist():
                 if member.lower().endswith(".txt"):
                     target = os.path.join(self.extracted_dir, os.path.basename(member))
+                    if not force and os.path.exists(target) and os.path.getsize(target) > 0:
+                        extracted_files.append(target)
+                        continue
                     with zf.open(member) as src, open(target, "wb") as dst:
                         dst.write(src.read())
                     extracted_files.append(target)
@@ -282,14 +314,19 @@ class MDRDownloader:
     def fetch_archives(
         self,
         archives: List[MDRFileInfo],
+        force: bool = False,
         verbose: bool = True,
     ) -> List[str]:
         """Downloads and unzips a list of archives. Returns all extracted .txt file paths."""
         all_extracted: List[str] = []
 
         for idx, archive in enumerate(archives, 1):
+            dest_path = os.path.join(self.zips_dir, archive.filename)
+            already_downloaded = not force and os.path.exists(dest_path) and os.path.getsize(dest_path) > 0
+
             if verbose:
-                print(f"[{idx}/{len(archives)}] Fetching {archive.filename}...")
+                status_msg = "Checking / Fetching" if not already_downloaded else "Verifying cached"
+                print(f"[{idx}/{len(archives)}] {status_msg} {archive.filename}...")
 
             def progress(downloaded: int, total: int):
                 if total > 0 and verbose:
@@ -302,11 +339,12 @@ class MDRDownloader:
                 zip_path = self.download_file(
                     archive.url,
                     archive.filename,
+                    force=force,
                     progress_callback=progress if verbose else None,
                 )
-                if verbose:
+                if verbose and not already_downloaded:
                     print()
-                txts = self.extract_zip(zip_path)
+                txts = self.extract_zip(zip_path, force=force)
                 all_extracted.extend(txts)
             except Exception as e:
                 if verbose:
@@ -511,19 +549,42 @@ class MDRDatabase:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ex_findings_code ON extracted_findings(code)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_ex_findings_comp ON extracted_findings(affected_component)")
 
+            # Ingestion Log to prevent duplicate ingestion of already processed flat files
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS mdr_sync_log (
+                    filename TEXT PRIMARY KEY,
+                    file_size INTEGER NOT NULL,
+                    row_count INTEGER NOT NULL,
+                    ingested_at TEXT NOT NULL
+                )
+            """)
+
             conn.commit()
         finally:
             conn.close()
 
-    def ingest_txt(self, filepath: str, chunk_size: int = 15000, verbose: bool = True) -> int:
+    def ingest_txt(self, filepath: str, chunk_size: int = 15000, force: bool = False, verbose: bool = True) -> int:
         """
         Parses and ingests a single .txt flat file into the database.
+        Checks mdr_sync_log to skip already-ingested files unless force=True.
         Returns number of rows ingested.
         """
-        total_rows = 0
-        conn = self._get_connection()
+        filename = os.path.basename(filepath)
+        file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
 
+        conn = self._get_connection()
         try:
+            if not force:
+                row = conn.execute(
+                    "SELECT row_count FROM mdr_sync_log WHERE filename = ? AND file_size = ?",
+                    (filename, file_size),
+                ).fetchone()
+                if row:
+                    if verbose:
+                        print(f"File {filename} is already ingested ({row[0]:,} rows). Skipping.")
+                    return 0
+
+            total_rows = 0
             for file_type, batch in MDRParser.stream_rows(filepath, chunk_size=chunk_size):
                 if file_type == "device":
                     records = [
@@ -583,37 +644,44 @@ class MDRDatabase:
                 if verbose:
                     print(f"\r   -> Ingested {total_rows:,} rows from {os.path.basename(filepath)}...", end="", flush=True)
 
+            conn.execute("""
+                INSERT OR REPLACE INTO mdr_sync_log (filename, file_size, row_count, ingested_at)
+                VALUES (?, ?, ?, ?)
+            """, (filename, file_size, total_rows, datetime.now(timezone.utc).isoformat()))
+            conn.commit()
+
             if verbose:
                 print()
+            return total_rows
         finally:
             conn.close()
-
-        return total_rows
 
     def sync(
         self,
         years: Optional[Union[int, Sequence[int], str]] = None,
         file_types: Optional[Sequence[str]] = None,
         download_dir: str = "data/mdr_downloads",
+        force: bool = False,
         verbose: bool = True,
     ) -> Dict[str, Any]:
         """
         One-stop automation: Resolves archives, downloads, unzips, and ingests into database.
+        Includes delta checks to skip files already downloaded and ingested.
         """
         downloader = MDRDownloader(download_dir=download_dir)
         archives = MDRCatalog.resolve_archives(years=years, file_types=file_types)
 
         if verbose:
-            print(f"Syncing {len(archives)} FDA MDR archives for years={years}...")
+            print(f"Syncing {len(archives)} FDA MDR archives for years={years} (force={force})...")
 
-        txt_files = downloader.fetch_archives(archives, verbose=verbose)
+        txt_files = downloader.fetch_archives(archives, force=force, verbose=verbose)
 
         if verbose:
             print(f"\nIngesting {len(txt_files)} extracted flat files into {self.db_path}...")
 
         total_rows = 0
         for txt in txt_files:
-            total_rows += self.ingest_txt(txt, verbose=verbose)
+            total_rows += self.ingest_txt(txt, force=force, verbose=verbose)
 
         stats = self.stats()
         stats["total_rows_ingested_this_sync"] = total_rows

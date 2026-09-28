@@ -6,7 +6,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Tests](https://img.shields.io/badge/tests-43%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-61%20passed-brightgreen.svg)]()
 [![Throughput](https://img.shields.io/badge/throughput-%7E150%20rec%2Fsec%2Fcore-orange.svg)]()
 [![IMDRF Release](https://img.shields.io/badge/IMDRF-2026%20Harmonized-purple.svg)](https://www.imdrf.org/)
 
@@ -30,20 +30,24 @@ The United States FDA **MAUDE** (Manufacturer and User Facility Device Experienc
 
 ## Key Features
 
-- **Cascaded Tiered Architecture**:
-  - **Tier 1 Fast-Path**: Sub-millisecond preprocessing, boilerplate stripping, greedy non-overlapping span extraction, and negation masking. Average CPU latency of **5–15 ms per record** (~150 records/sec/core).
-  - **Tier 2 Edge SLM Fallback**: Targeted invocation of **Gemma 4** architectures with strict JSON schema constraints for ambiguous or high-entropy edge cases.
-  - **Frontier LLM Distillation**: Integrated harness for **Gemini 3.8 Flash** for synthetic gold dataset generation and model distillation.
+- **Deterministic High-Throughput Engine**:
+  - Sub-millisecond preprocessing, boilerplate stripping, greedy non-overlapping span extraction, and negation masking. Average CPU latency of **5–15 ms per record** (~150 records/sec/core).
+- **Durable Extraction Store (SQLite)**:
+  - Persist, resume, and continually compile extraction findings across millions of records without reprocessing. Supports lossless roundtrip serialization of Pydantic models.
+- **Orchestrated Delta Pipeline**:
+  - Memory-constant streaming chunk processing with automated SQL anti-joins (`skip_already_extracted`) to query, extract, and save only delta records with zero redundant compute.
 - **Granular Regulatory Grounding (IMDRF 2026 & MedDRA)**:
   - Eliminates ontology collapse by providing Level 3/4 code distinctions (e.g. separating complete fractures `A040101` from surface cracks `A0404`, balloon bursts `A0414`, misfires `A050502`, and cutting failures `A050702`).
 - **Anatomical Component Linkage (IMDRF Annex G)**:
   - Syntactically binds physical device components (e.g. `sheath hub`, `polyaxial tulip collar`, `hemostasis valve junction`) directly to their specific failure predicate.
 - **Entity Resolution & Deduplication**:
   - Resolves acronym coreferences (e.g., `coronary artery bypass graft` vs. `CABG`) while preserving multi-aspect physical manifestations that share parent ontology branches.
-- **Direct openFDA & Bulk Streaming**:
-  - Out-of-the-box support for querying the official openFDA API and streaming multi-gigabyte historical quarterly partitions directly from `download.open.fda.gov` without memory exhaustion.
+- **Direct openFDA & Offline MDR Database**:
+  - Out-of-the-box support for querying the official openFDA API and syncing historical FDA MDR flat files with automatic download caching and delta checks.
+- **Native Vigipy Integration**:
+  - Disproportionality surveillance bridge compiling extractions directly into `vigipy.DataContainer` objects for PRR, ROR, GPS, BCPNN, and multivariable LASSO regressions.
 - **Zero Heavyweight Runtime Dependencies**:
-  - Core library runs on pure Python and Pydantic v2—no mandatory PyTorch or heavy C++ binaries required for standard high-throughput extraction.
+  - Core library runs entirely on pure Python and Pydantic v2—no neural model weights, PyTorch, or GPU required. Optional experimental LLM modules are strictly decoupled.
 
 ---
 
@@ -275,41 +279,36 @@ spotlight version
                                          │
                                          ▼
                   ┌──────────────────────────────────────────────┐
-                  │    Tier 1: High-Speed Greedy Span Triage     │
-                  │  • Non-overlapping longest span matching     │
-                  │  • Sub-millisecond CPU execution             │
-                  └──────────────┬───────────────────────────────┘
-                                 │
-                     Confidence < 0.80 or Ambiguous?
-                                ╱ ╲
-                               YES NO
-                              ╱     ╲
-                             ▼       ▼
-    ┌──────────────────────────────┐  │
-    │   Tier 2: Gemma 4 SLM        │  │
-    │   Structured JSON extraction │  │
-    └──────────────┬───────────────┘  │
-                   │                  │
-                   └─────────┬────────┘
-                             ▼
-    ┌────────────────────────────────────────────────────────────┐
-    │          IMDRF & MedDRA Ontology Grounding Engine          │
-    │  • Annex A (Device Problems)   • Annex C (Pre-Use / Mfg)   │
-    │  • Annex E (Adverse Events)    • Annex F (Interventions)   │
-    └────────────────────────┬───────────────────────────────────┘
-                             │
-                             ▼
-    ┌────────────────────────────────────────────────────────────┐
-    │     Component Linker & Entity Deduplication Resolver       │
-    │  • Bind physical components (sheath hub, collar, jaw)      │
-    │  • Resolve acronym coreference (CABG <-> bypass graft)     │
-    │  • Attribute clinical interventions to adverse events      │
-    └────────────────────────┬───────────────────────────────────┘
-                             │
-                             ▼
-    ┌────────────────────────────────────────────────────────────┐
-    │       Structured MAUDEExtractionOutput (JSON / Object)     │
-    └────────────────────────────────────────────────────────────┘
+                  │    Stage 2: Deterministic Span Triage        │
+                  │  • Greedy longest-match span extraction      │
+                  │  • Sub-millisecond CPU execution (~10ms)     │
+                  │  • Classify failure & event candidate spans  │
+                  └──────────────────────┬───────────────────────┘
+                                         │
+                                         ▼
+                  ┌──────────────────────────────────────────────┐
+                  │    Stage 3: IMDRF & MedDRA Grounding         │
+                  │  • Annex A (Device Operational Problems)     │
+                  │  • Annex C (Pre-Use / Manufacturing Issues)  │
+                  │  • Annex E (Patient Adverse Events)          │
+                  │  • Annex F (Clinical Rescue Interventions)   │
+                  └──────────────────────┬───────────────────────┘
+                                         │
+                                         ▼
+                  ┌──────────────────────────────────────────────┐
+                  │    Stage 4: Component Linker & Deduplication │
+                  │  • Syntactically bind physical components    │
+                  │  • Resolve acronym coreferences (CABG)       │
+                  │  • Attribute interventions to adverse events │
+                  └──────────────────────┬───────────────────────┘
+                                         │
+                                         ▼
+                  ┌──────────────────────────────────────────────┐
+                  │   Stage 5: Output & Persistence Layer        │
+                  │  • Typed Pydantic MAUDEExtractionOutput      │
+                  │  • Durable Extraction Store (SQLite WAL)     │
+                  │  • Direct Vigipy Disproportionality Bridge   │
+                  └──────────────────────────────────────────────┘
 ```
 
 ---
@@ -359,7 +358,21 @@ pytest tests/ -v
 - **Fast-Path Latency**: **5.8 ms – 19.4 ms** per narrative.
 - **Throughput**: **100 – 150 records / second / core**.
 - **Memory Overhead**: < 150 MB peak resident set size.
-- **Test Suite**: **43 passing tests** covering preprocessing, token triage, component linkage, acronym reconciliation, ontology disambiguation, API ergonomics, and CLI commands.
+- **Test Suite**: **61 passing tests** covering preprocessing, token triage, component linkage, acronym reconciliation, ontology disambiguation, openFDA fetching, MDR database delta ingestion, durable extraction store, Vigipy bridge, and CLI commands.
+
+---
+
+## Experimental & Research Modules (Optional SLM & Distillation)
+
+> [!NOTE]
+> The core Spotlight extraction pipeline is 100% deterministic and runs locally on CPU with zero neural model weights or cloud API calls. The modules below are optional experimental interfaces intended for advanced research and custom model exploration.
+
+### Edge SLM Fallback Interface (`spotlight.llm_fallback.Gemma4FallbackEngine`)
+- An optional fallback class designed to interface with an external OpenAI-compatible inference server (e.g. vLLM, Ollama, or llama.cpp) hosting open-weight models (such as Gemma 4 2B, 4B, 12B, or 26B).
+- If no endpoint URL is specified, this engine uses a deterministic testing mock and will never attempt network requests or weight downloads.
+
+### Frontier Teacher Distillation Template (`spotlight.llm_fallback.Gemini38FlashDistillationClient`)
+- A prompt-formatting scaffold designed for structuring chain-of-thought extraction prompts for frontier LLM APIs (e.g. Google AI Studio) when generating synthetic training datasets. This is currently a prompt-template interface and does not include training loops or fine-tuning pipelines.
 
 ---
 
