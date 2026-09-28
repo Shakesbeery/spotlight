@@ -11,7 +11,7 @@ from spotlight.schemas import (
     TemporalTiming,
     ExtractedFinding,
 )
-from spotlight.preprocessor import CleanedSegment
+from spotlight.preprocessor import CleanedSegment, NEGATION_PATTERNS
 from spotlight.ontology import OntologyMatcher
 
 
@@ -94,6 +94,30 @@ class FastTriageEngine:
         self.compiled_ae = [re.compile(p, re.IGNORECASE) for p in AE_PATTERNS]
         self.compiled_interventions = [re.compile(p, re.IGNORECASE) for p in INTERVENTION_PATTERNS]
         self.compiled_other = [re.compile(p, re.IGNORECASE) for p in OTHER_PATTERNS]
+        self.compiled_negations = [re.compile(p, re.IGNORECASE) for p in NEGATION_PATTERNS]
+
+    def _is_span_negated(self, text: str, span_start: int, span_end: int, is_seg_negated: bool) -> bool:
+        """Determines if a candidate span falls within the scope of a negation cue in text."""
+        if not is_seg_negated:
+            return False
+
+        for pat in self.compiled_negations:
+            for m in pat.finditer(text):
+                # 1. Direct overlap with negation match (e.g. "injury" in "no patient injury")
+                if max(span_start, m.start()) < min(span_end, m.end()):
+                    return True
+                # 2. Forward scope: span begins within 45 chars after negation trigger
+                if m.start() <= span_start <= m.end() + 45:
+                    between = text[m.end():span_start]
+                    # Contrastive conjunction breaks negation scope
+                    if not re.search(r"\b(?:but|however|although|yet|except|despite)\b", between, re.IGNORECASE):
+                        return True
+                # 3. Backward scope: span immediately precedes negative verbs (e.g. "was not observed")
+                if m.start() - 35 <= span_end <= m.start():
+                    between = text[span_end:m.start()]
+                    if not re.search(r"\b(?:but|however|although|yet|except|despite)\b", between, re.IGNORECASE):
+                        return True
+        return False
 
     def _match_patterns(self, text: str, patterns: List[re.Pattern]) -> List[Tuple[str, int, int]]:
         """Finds all non-overlapping matches with start/end character offsets, prioritizing longer matches."""
@@ -126,15 +150,13 @@ class FastTriageEngine:
         requires_fallback = False
 
         for seg in segments:
-            # Skip negated segments (e.g. "No patient injury occurred")
-            if seg.is_negated:
-                continue
-
             text = seg.text
 
             # 1. Search for Manufacturing / Pre-use cues
             mfg_matches = self._match_patterns(text, self.compiled_mfg)
             for span, start, end in mfg_matches:
+                if self._is_span_negated(text, start, end, seg.is_negated):
+                    continue
                 # If discovered prior to use, in packaging, or confirmed in evaluation
                 if seg.temporal_timing == TemporalTiming.PRE_USE or seg.section == "MANUFACTURER_EVALUATION":
                     base_conf = 0.90
@@ -157,6 +179,8 @@ class FastTriageEngine:
             # 2. Search for Operational Device Problems
             dev_matches = self._match_patterns(text, self.compiled_dev)
             for span, start, end in dev_matches:
+                if self._is_span_negated(text, start, end, seg.is_negated):
+                    continue
                 base_conf = 0.90 if seg.temporal_timing in (TemporalTiming.INTRA_USE, TemporalTiming.UNKNOWN) else 0.70
                 grounded = self.ontology_matcher.match_span(span, category=CategoryType.OPERATIONAL_PROBLEM)
 
@@ -175,6 +199,8 @@ class FastTriageEngine:
             # 3. Search for Patient Adverse Events
             ae_matches = self._match_patterns(text, self.compiled_ae)
             for span, start, end in ae_matches:
+                if self._is_span_negated(text, start, end, seg.is_negated):
+                    continue
                 base_conf = 0.92
                 grounded = self.ontology_matcher.match_span(span, category=CategoryType.ADVERSE_EVENT)
 
@@ -193,6 +219,8 @@ class FastTriageEngine:
             # 4. Search for Clinical / Surgical Interventions
             int_matches = self._match_patterns(text, self.compiled_interventions)
             for span, start, end in int_matches:
+                if self._is_span_negated(text, start, end, seg.is_negated):
+                    continue
                 base_conf = 0.90
                 grounded = self.ontology_matcher.match_span(span, category=CategoryType.CLINICAL_INTERVENTIONS)
 
@@ -211,6 +239,8 @@ class FastTriageEngine:
             # 5. Search for Other issues
             other_matches = self._match_patterns(text, self.compiled_other)
             for span, start, end in other_matches:
+                if self._is_span_negated(text, start, end, seg.is_negated):
+                    continue
                 findings.append(
                     ExtractedFinding(
                         category=CategoryType.OTHER,

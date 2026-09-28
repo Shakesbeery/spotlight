@@ -65,3 +65,21 @@ def test_fast_triage_fallback_triggered_on_unrecognized_long_text():
     # Since text > 120 chars and no findings were detected, fallback should trigger
     assert len(findings) == 0
     assert requires_fallback is True
+
+
+def test_fast_triage_mixed_sentence_negation_preserves_positive_finding():
+    """Verifies that within a single sentence containing both an affirmative malfunction
+    and a negated injury, the affirmative finding is extracted while the negated injury is suppressed."""
+    preprocessor = MAUDEPreprocessor()
+    triage = FastTriageEngine(confidence_threshold=0.80)
+
+    # In one sentence: positive malfunction ("fractured") + contrastive negated AE ("no patient injury")
+    text = "The balloon catheter fractured during deployment, but no patient injury or bleeding occurred."
+    segments = preprocessor.segment_text(text)
+    findings, _ = triage.process_segments(segments)
+
+    # Operational problem (fractured) should be captured
+    assert any(f.category == CategoryType.OPERATIONAL_PROBLEM for f in findings)
+    # The negated adverse events (patient injury, bleeding) should NOT be captured
+    assert not any(f.category == CategoryType.ADVERSE_EVENT for f in findings)
+

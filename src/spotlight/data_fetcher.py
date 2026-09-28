@@ -7,6 +7,7 @@ Supports:
 
 import urllib.request
 import urllib.parse
+import urllib.error
 import json
 import zipfile
 import os
@@ -18,11 +19,56 @@ from spotlight.schemas import MAUDERecordInput
 OPENFDA_DEVICE_EVENT_URL = "https://api.fda.gov/device/event.json"
 
 
+def _parse_openfda_record(item: Dict[str, Any]) -> Optional[MAUDERecordInput]:
+    """Parses a single raw openFDA item into a MAUDERecordInput."""
+    mdr_key = str(item.get("mdr_report_key", item.get("report_number", "UNKNOWN")))
+    event_type_val = item.get("event_type", "Unknown")
+
+    # Extract device brand name & product code
+    brand_name = None
+    product_code = None
+    devices = item.get("device", [])
+    if devices and isinstance(devices, list):
+        brand_name = devices[0].get("brand_name")
+        product_code = devices[0].get("device_report_product_code")
+
+    # Extract narrative texts (combine Event Description and Evaluation if present)
+    mdr_texts = item.get("mdr_text", [])
+    narrative_parts = []
+    if isinstance(mdr_texts, list):
+        for text_entry in mdr_texts:
+            t_type = text_entry.get("text_type_code", "")
+            content = text_entry.get("text", "")
+            if not content:
+                continue
+            if t_type == "Description of Event or Problem":
+                narrative_parts.append(f"EVENT DESCRIPTION: {content}")
+            elif t_type == "Manufacturer Evaluation":
+                narrative_parts.append(f"MANUFACTURER EVALUATION: {content}")
+            elif t_type == "Additional Manufacturer Narrative":
+                narrative_parts.append(f"ADDITIONAL NARRATIVE: {content}")
+            else:
+                narrative_parts.append(content)
+
+    full_narrative = "\n\n".join(narrative_parts).strip()
+    if not full_narrative:
+        return None
+
+    return MAUDERecordInput(
+        mdr_report_key=mdr_key,
+        brand_name=brand_name,
+        product_code=product_code,
+        event_type=event_type_val,
+        narrative_text=full_narrative,
+    )
+
+
 class MAUDEDataFetcher:
     """Fetches real FDA MAUDE records for testing and production ingestion."""
 
-    def __init__(self, data_dir: str = "data"):
+    def __init__(self, data_dir: str = "data", api_key: Optional[str] = None):
         self.data_dir = data_dir
+        self.api_key = api_key or os.getenv("OPENFDA_API_KEY")
         os.makedirs(self.data_dir, exist_ok=True)
 
     def save_records_to_json(self, records: List[MAUDERecordInput], filename: str) -> str:
@@ -38,13 +84,18 @@ class MAUDEDataFetcher:
         limit: int = 20,
         event_type: Optional[str] = None,
         query: Optional[str] = None,
+        api_key: Optional[str] = None,
     ) -> List[MAUDERecordInput]:
         """
-        Fetches live, real FDA MAUDE records from the official openFDA API.
-        Extracts narrative text (MDR text), device brand name, product code, and MDR report key.
-        """
-        params = {"limit": min(limit, 100)}
+        Fetches live, real FDA MAUDE records from the official openFDA API with
+        automatic offset pagination (up to openFDA's 25,000 skip limit) and exponential backoff.
 
+        Args:
+            limit: Target number of records to fetch.
+            event_type: Optional event type filter (e.g. 'Malfunction', 'Injury', 'Death').
+            query: Custom openFDA search sub-query.
+            api_key: Optional openFDA API key for higher rate limits (overrides self.api_key).
+        """
         search_terms = []
         if event_type:
             search_terms.append(f'event_type:"{event_type}"')
@@ -53,68 +104,79 @@ class MAUDEDataFetcher:
         # Ensure records contain actual narrative text
         search_terms.append("_exists_:mdr_text.text")
 
-        if search_terms:
-            params["search"] = " AND ".join(search_terms)
-
-        url = f"{OPENFDA_DEVICE_EVENT_URL}?{urllib.parse.urlencode(params)}"
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Spotlight-FDA-NLP-System/1.0"}
-        )
-
-        with urllib.request.urlopen(req, timeout=30) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-
-        raw_results = payload.get("results", [])
+        search_param = " AND ".join(search_terms) if search_terms else ""
+        active_api_key = api_key or self.api_key
         records: List[MAUDERecordInput] = []
+        skip = 0
+        max_skip = 25000
 
-        for item in raw_results:
-            mdr_key = str(item.get("mdr_report_key", item.get("report_number", "UNKNOWN")))
-            event_type_val = item.get("event_type", "Unknown")
+        while len(records) < limit and skip < max_skip:
+            chunk_size = min(limit - len(records), 100)
+            if skip + chunk_size > max_skip:
+                chunk_size = max_skip - skip
+                if chunk_size <= 0:
+                    break
 
-            # Extract device brand name & product code
-            brand_name = None
-            product_code = None
-            devices = item.get("device", [])
-            if devices and isinstance(devices, list):
-                brand_name = devices[0].get("brand_name")
-                product_code = devices[0].get("device_report_product_code")
+            params = {
+                "limit": str(chunk_size),
+                "skip": str(skip),
+            }
+            if search_param:
+                params["search"] = search_param
+            if active_api_key:
+                params["api_key"] = active_api_key
 
-            # Extract narrative texts (combine Event Description and Evaluation if present)
-            mdr_texts = item.get("mdr_text", [])
-            narrative_parts = []
-            if isinstance(mdr_texts, list):
-                for text_entry in mdr_texts:
-                    t_type = text_entry.get("text_type_code", "")
-                    content = text_entry.get("text", "")
-                    if not content:
-                        continue
-                    if t_type == "Description of Event or Problem":
-                        narrative_parts.append(f"EVENT DESCRIPTION: {content}")
-                    elif t_type == "Manufacturer Evaluation":
-                        narrative_parts.append(f"MANUFACTURER EVALUATION: {content}")
-                    elif t_type == "Additional Manufacturer Narrative":
-                        narrative_parts.append(f"ADDITIONAL NARRATIVE: {content}")
-                    else:
-                        narrative_parts.append(content)
-
-            full_narrative = "\n\n".join(narrative_parts).strip()
-            if not full_narrative:
-                continue
-
-            records.append(
-                MAUDERecordInput(
-                    mdr_report_key=mdr_key,
-                    brand_name=brand_name,
-                    product_code=product_code,
-                    event_type=event_type_val,
-                    narrative_text=full_narrative,
-                )
+            url = f"{OPENFDA_DEVICE_EVENT_URL}?{urllib.parse.urlencode(params)}"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Spotlight-FDA-NLP-System/1.0"}
             )
+
+            payload = None
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as response:
+                        payload = json.loads(response.read().decode("utf-8"))
+                    break
+                except urllib.error.HTTPError as e:
+                    if e.code == 404:
+                        # openFDA returns 404 when 0 records match or pagination exceeds dataset
+                        payload = {"results": []}
+                        break
+                    elif e.code == 429 and attempt < max_retries - 1:
+                        # Rate limited: wait and retry with backoff
+                        time.sleep(1.5 * (2 ** attempt))
+                        continue
+                    else:
+                        raise
+
+            if not payload:
+                break
+
+            raw_results = payload.get("results", [])
+            if not raw_results:
+                break
+
+            for item in raw_results:
+                rec = _parse_openfda_record(item)
+                if rec:
+                    records.append(rec)
+                    if len(records) >= limit:
+                        break
+
+            if len(raw_results) < chunk_size:
+                break
+
+            skip += len(raw_results)
 
         return records
 
-    def fetch_diverse_real_dataset(self, samples_per_category: int = 5) -> List[MAUDERecordInput]:
+    def fetch_diverse_real_dataset(
+        self,
+        samples_per_category: int = 5,
+        api_key: Optional[str] = None,
+    ) -> List[MAUDERecordInput]:
         """
         Fetches a balanced set of real FDA MAUDE records across operational malfunctions,
         pre-use/manufacturing defects, and clinical adverse events.
@@ -126,7 +188,8 @@ class MAUDEDataFetcher:
             malfunctions = self.fetch_openfda_records(
                 limit=samples_per_category,
                 event_type="Malfunction",
-                query='(mdr_text.text:"rupture" OR mdr_text.text:"fracture" OR mdr_text.text:"detach" OR mdr_text.text:"failure to deploy")'
+                query='(mdr_text.text:"rupture" OR mdr_text.text:"fracture" OR mdr_text.text:"detach" OR mdr_text.text:"failure to deploy")',
+                api_key=api_key,
             )
             dataset.extend(malfunctions)
         except Exception as e:
@@ -136,7 +199,8 @@ class MAUDEDataFetcher:
         try:
             mfg_issues = self.fetch_openfda_records(
                 limit=samples_per_category,
-                query='(mdr_text.text:"particulate" OR mdr_text.text:"sterile barrier" OR mdr_text.text:"prior to use" OR mdr_text.text:"compromised seal")'
+                query='(mdr_text.text:"particulate" OR mdr_text.text:"sterile barrier" OR mdr_text.text:"prior to use" OR mdr_text.text:"compromised seal")',
+                api_key=api_key,
             )
             dataset.extend(mfg_issues)
         except Exception as e:
@@ -147,7 +211,8 @@ class MAUDEDataFetcher:
             injuries = self.fetch_openfda_records(
                 limit=samples_per_category,
                 event_type="Injury",
-                query='(mdr_text.text:"perforation" OR mdr_text.text:"dissection" OR mdr_text.text:"bleeding" OR mdr_text.text:"injury")'
+                query='(mdr_text.text:"perforation" OR mdr_text.text:"dissection" OR mdr_text.text:"bleeding" OR mdr_text.text:"injury")',
+                api_key=api_key,
             )
             dataset.extend(injuries)
         except Exception as e:

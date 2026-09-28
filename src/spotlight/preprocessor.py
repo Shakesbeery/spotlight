@@ -113,10 +113,10 @@ class MAUDEPreprocessor:
         cleaned = re.sub(r"\n\s*\n+", "\n\n", cleaned)
         return cleaned.strip()
 
-    def parse_sections(self, text: str) -> Dict[str, str]:
+    def parse_sections_with_offsets(self, text: str) -> List[Tuple[str, str, int, int]]:
         """
-        Parses common section headers present in MAUDE reports (e.g. EVENT DESCRIPTION vs EVALUATION).
-        Returns a dictionary mapping section names to text.
+        Parses common section headers present in MAUDE reports with exact character offsets.
+        Returns list of tuples: (section_name, section_text, start_char, end_char).
         """
         section_markers = [
             (r"(?i)\b(?:event description|description of event|report narrative):\s*", "EVENT_DESCRIPTION"),
@@ -124,34 +124,46 @@ class MAUDEPreprocessor:
             (r"(?i)\b(?:additional manufacturer narrative|remedial action|corrective action):\s*", "ADDITIONAL_NARRATIVE"),
         ]
 
-        # Find marker positions
         found = []
         for pat, sec_name in section_markers:
             for match in re.finditer(pat, text):
                 found.append((match.start(), match.end(), sec_name))
 
         if not found:
-            return {"EVENT_DESCRIPTION": text}
+            return [("EVENT_DESCRIPTION", text, 0, len(text))]
 
-        # Sort by start offset
         found.sort(key=lambda x: x[0])
-        sections = {}
+        sections = []
 
         # Content before first header
         if found[0][0] > 0:
-            prefix = text[: found[0][0]].strip()
-            if prefix:
-                sections["EVENT_DESCRIPTION"] = prefix
+            prefix = text[: found[0][0]]
+            if prefix.strip():
+                sections.append(("EVENT_DESCRIPTION", prefix, 0, found[0][0]))
 
         for i, (start, end, sec_name) in enumerate(found):
             next_start = found[i + 1][0] if i + 1 < len(found) else len(text)
-            sec_text = text[end:next_start].strip()
-            if sec_name in sections:
-                sections[sec_name] += "\n" + sec_text
-            else:
-                sections[sec_name] = sec_text
+            sec_text = text[end:next_start]
+            sections.append((sec_name, sec_text, end, next_start))
 
         return sections
+
+    def parse_sections(self, text: str) -> Dict[str, str]:
+        """
+        Parses common section headers present in MAUDE reports (e.g. EVENT DESCRIPTION vs EVALUATION).
+        Returns a dictionary mapping section names to text.
+        """
+        sections_with_offsets = self.parse_sections_with_offsets(text)
+        result = {}
+        for sec_name, sec_text, _, _ in sections_with_offsets:
+            clean_text = sec_text.strip()
+            if not clean_text:
+                continue
+            if sec_name in result:
+                result[sec_name] += "\n" + clean_text
+            else:
+                result[sec_name] = clean_text
+        return result or {"EVENT_DESCRIPTION": text}
 
     def infer_temporal_timing(self, text: str) -> TemporalTiming:
         """Detects whether clause discusses pre-use, intra-use, or post-use."""
@@ -173,28 +185,32 @@ class MAUDEPreprocessor:
                 return True
         return False
 
-    def segment_text(self, text: str) -> List[CleanedSegment]:
+    def segment_text(self, text: str, is_cleaned: bool = False) -> List[CleanedSegment]:
         """
-        Cleans, parses sections, and breaks narrative down into typed clauses/segments.
+        Cleans, parses sections, and breaks narrative down into typed clauses/segments
+        with global character offsets corresponding directly to cleaned narrative.
         """
-        cleaned = self.strip_boilerplate(text)
-        sections = self.parse_sections(cleaned)
+        cleaned = text if is_cleaned else self.strip_boilerplate(text)
+        sections = self.parse_sections_with_offsets(cleaned)
         segments: List[CleanedSegment] = []
 
-        global_char_offset = 0
-        for sec_name, sec_content in sections.items():
-            # Regex sentence boundary splitting respecting abbreviations (e.g. Dr., St., etc.)
-            raw_sentences = re.split(r"(?<=[.!?])\s+", sec_content)
-            current_offset = 0
+        for sec_name, sec_text, sec_start, sec_end in sections:
+            raw_sentences = re.split(r"(?<=[.!?])\s+", sec_text)
+            current_local_offset = 0
 
             for sent in raw_sentences:
                 sent = sent.strip()
                 if not sent:
                     continue
 
-                sent_start = sec_content.find(sent, current_offset)
-                sent_end = sent_start + len(sent) if sent_start != -1 else current_offset + len(sent)
-                current_offset = sent_end
+                sent_local_start = sec_text.find(sent, current_local_offset)
+                if sent_local_start == -1:
+                    sent_local_start = current_local_offset
+                sent_local_end = sent_local_start + len(sent)
+                current_local_offset = sent_local_end
+
+                global_start = sec_start + sent_local_start
+                global_end = sec_start + sent_local_end
 
                 timing = self.infer_temporal_timing(sent)
                 is_negated = self.check_negation(sent)
@@ -203,8 +219,8 @@ class MAUDEPreprocessor:
                     CleanedSegment(
                         text=sent,
                         section=sec_name,
-                        start_char=sent_start,
-                        end_char=sent_end,
+                        start_char=global_start,
+                        end_char=global_end,
                         temporal_timing=timing,
                         is_negated=is_negated,
                     )

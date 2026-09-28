@@ -30,6 +30,8 @@ from spotlight.schemas import (
     TemporalTiming,
 )
 
+import contextlib
+
 # Optional dependency imports handled gracefully
 try:
     import pandas as pd
@@ -41,11 +43,28 @@ except ImportError:
 try:
     import vigipy
     _HAS_VIGIPY = True
-    # Ensure pandas 3.0 / pyarrow compatibility for vigipy contingency tables
+except ImportError:
+    vigipy = None
+    _HAS_VIGIPY = False
+
+
+@contextlib.contextmanager
+def _vigipy_compat_context():
+    """
+    Context manager that temporarily applies the pandas 3.0 / pyarrow compatibility fix
+    to vigipy.utils.data_prep.compute_contingency and safely restores the original function on exit.
+    """
+    if not _HAS_VIGIPY or not _HAS_PANDAS:
+        yield
+        return
+
+    orig_fn = None
+    vdp_module = None
     try:
         import vigipy.utils.data_prep as _vdp
         import numpy as _np
-        _orig_cc = _vdp.compute_contingency
+        vdp_module = _vdp
+        orig_fn = getattr(_vdp, "compute_contingency", None)
 
         def _compat_compute_contingency(data_frame, product_label="name", count_label="count", ae_label="AE", margin_threshold=1):
             data_cont = pd.pivot_table(
@@ -67,9 +86,12 @@ try:
         _vdp.compute_contingency = _compat_compute_contingency
     except Exception:
         pass
-except ImportError:
-    vigipy = None
-    _HAS_VIGIPY = False
+
+    try:
+        yield
+    finally:
+        if vdp_module is not None and orig_fn is not None:
+            vdp_module.compute_contingency = orig_fn
 
 
 def _extract_target_string(finding: ExtractedFinding, target_level: str) -> str:
@@ -317,15 +339,16 @@ def to_vigipy_container(
             deduplicate_per_report=deduplicate_per_report,
             format="transaction",
         )
-        container = vigipy.convert_binary(
-            df,
-            product_label="product",
-            ae_label="finding",
-            report_id_label="report_id",
-            covariate_labels=covariate_labels,
-            sparse=sparse,
-            **convert_kwargs,
-        )
+        with _vigipy_compat_context():
+            container = vigipy.convert_binary(
+                df,
+                product_label="product",
+                ae_label="finding",
+                report_id_label="report_id",
+                covariate_labels=covariate_labels,
+                sparse=sparse,
+                **convert_kwargs,
+            )
         # Ensure sparse DataFrames fill unobserved entries with 0.0 to prevent NaN propagation in LASSO
         if sparse and hasattr(container, "event_outcomes") and container.event_outcomes is not None:
             try:
@@ -350,14 +373,15 @@ def to_vigipy_container(
             deduplicate_per_report=deduplicate_per_report,
             format="aggregated",
         )
-        return vigipy.convert(
-            df,
-            product_label="product",
-            ae_label="finding",
-            count_label="count",
-            margin_threshold=margin_threshold,
-            **convert_kwargs,
-        )
+        with _vigipy_compat_context():
+            return vigipy.convert(
+                df,
+                product_label="product",
+                ae_label="finding",
+                count_label="count",
+                margin_threshold=margin_threshold,
+                **convert_kwargs,
+            )
 
 
 def run_disproportionality_scan(

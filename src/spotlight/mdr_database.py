@@ -769,16 +769,17 @@ class MDRDatabase:
 
     def _build_query_filter(
         self,
-        product_code: Optional[str] = None,
+        product_code: Optional[Union[str, Sequence[str]]] = None,
         brand_name: Optional[str] = None,
         event_type: Optional[str] = None,
         query: Optional[str] = None,
         mdr_report_key: Optional[str] = None,
         mdr_report_keys: Optional[Sequence[str]] = None,
         only_unextracted: bool = False,
+        product_codes: Optional[Sequence[str]] = None,
     ) -> Tuple[str, str, List[Any]]:
         """Constructs WHERE clauses and JOINs for raw record querying."""
-        where_clauses = ["t.foi_text IS NOT NULL", "t.foi_text != ''"]
+        where_clauses = ["t.full_narrative IS NOT NULL", "t.full_narrative != ''"]
         params: List[Any] = []
 
         if mdr_report_key:
@@ -790,9 +791,23 @@ class MDRDatabase:
             where_clauses.append(f"d.mdr_report_key IN ({placeholders})")
             params.extend([str(k).strip() for k in mdr_report_keys])
 
+        active_codes = []
+        if product_codes:
+            active_codes.extend([str(c).upper().strip() for c in product_codes])
         if product_code:
-            where_clauses.append("UPPER(d.product_code) = ?")
-            params.append(product_code.upper().strip())
+            if isinstance(product_code, (list, tuple, set)):
+                active_codes.extend([str(c).upper().strip() for c in product_code])
+            else:
+                active_codes.append(product_code.upper().strip())
+
+        if active_codes:
+            if len(active_codes) == 1:
+                where_clauses.append("UPPER(d.product_code) = ?")
+                params.append(active_codes[0])
+            else:
+                placeholders = ",".join("?" for _ in active_codes)
+                where_clauses.append(f"UPPER(d.product_code) IN ({placeholders})")
+                params.extend(active_codes)
 
         if brand_name:
             where_clauses.append("LOWER(d.brand_name) LIKE ?")
@@ -804,7 +819,7 @@ class MDRDatabase:
             params.append(event_type.lower().strip())
 
         if query:
-            where_clauses.append("LOWER(t.foi_text) LIKE ?")
+            where_clauses.append("LOWER(t.full_narrative) LIKE ?")
             params.append(f"%{query.lower().strip()}%")
 
         anti_join = ""
@@ -816,13 +831,14 @@ class MDRDatabase:
 
     def count_records(
         self,
-        product_code: Optional[str] = None,
+        product_code: Optional[Union[str, Sequence[str]]] = None,
         brand_name: Optional[str] = None,
         event_type: Optional[str] = None,
         query: Optional[str] = None,
         mdr_report_key: Optional[str] = None,
         mdr_report_keys: Optional[Sequence[str]] = None,
         only_unextracted: bool = False,
+        product_codes: Optional[Sequence[str]] = None,
     ) -> int:
         """Counts distinct reports matching criteria."""
         anti_join, where_sql, params = self._build_query_filter(
@@ -833,11 +849,17 @@ class MDRDatabase:
             mdr_report_key=mdr_report_key,
             mdr_report_keys=mdr_report_keys,
             only_unextracted=only_unextracted,
+            product_codes=product_codes,
         )
         sql = f"""
             SELECT COUNT(DISTINCT d.mdr_report_key)
-            FROM mdr_device d
-            JOIN mdr_text t ON d.mdr_report_key = t.mdr_report_key
+            FROM (
+                SELECT mdr_report_key, GROUP_CONCAT(foi_text, char(10) || char(10)) AS full_narrative
+                FROM mdr_text
+                WHERE foi_text IS NOT NULL AND foi_text != ''
+                GROUP BY mdr_report_key
+            ) t
+            JOIN mdr_device d ON t.mdr_report_key = d.mdr_report_key
             LEFT JOIN mdr_master m ON d.mdr_report_key = m.mdr_report_key
             {anti_join}
             WHERE {where_sql}
@@ -851,7 +873,7 @@ class MDRDatabase:
 
     def stream_records(
         self,
-        product_code: Optional[str] = None,
+        product_code: Optional[Union[str, Sequence[str]]] = None,
         brand_name: Optional[str] = None,
         event_type: Optional[str] = None,
         query: Optional[str] = None,
@@ -860,10 +882,13 @@ class MDRDatabase:
         only_unextracted: bool = False,
         limit: Optional[int] = None,
         chunk_size: int = 2000,
+        product_codes: Optional[Sequence[str]] = None,
     ) -> Generator[MAUDERecordInput, None, None]:
         """
         Streams joined, fully-populated MAUDERecordInput instances on-the-fly.
         Memory-constant streaming: executes on disk via indexed joins.
+        Safely aggregates narrative texts per report key without cartesian inflation
+        from multi-device reports.
         """
         conn = self._get_connection()
         anti_join, where_sql, params = self._build_query_filter(
@@ -874,6 +899,7 @@ class MDRDatabase:
             mdr_report_key=mdr_report_key,
             mdr_report_keys=mdr_report_keys,
             only_unextracted=only_unextracted,
+            product_codes=product_codes,
         )
 
         limit_sql = f"LIMIT {limit}" if limit is not None else ""
@@ -884,9 +910,14 @@ class MDRDatabase:
                 d.brand_name,
                 d.product_code,
                 COALESCE(m.event_type, 'Unknown') as event_type,
-                GROUP_CONCAT(t.foi_text, '\n\n') as full_narrative
-            FROM mdr_device d
-            JOIN mdr_text t ON d.mdr_report_key = t.mdr_report_key
+                t.full_narrative
+            FROM (
+                SELECT mdr_report_key, GROUP_CONCAT(foi_text, char(10) || char(10)) AS full_narrative
+                FROM mdr_text
+                WHERE foi_text IS NOT NULL AND foi_text != ''
+                GROUP BY mdr_report_key
+            ) t
+            JOIN mdr_device d ON t.mdr_report_key = d.mdr_report_key
             LEFT JOIN mdr_master m ON d.mdr_report_key = m.mdr_report_key
             {anti_join}
             WHERE {where_sql}
@@ -963,11 +994,13 @@ class MDRDatabase:
                 FROM mdr_master WHERE mdr_report_key = ? LIMIT 1
             """, (str(mdr_report_key),)).fetchone()
 
-            dev_row = conn.execute("""
+            dev_rows = conn.execute("""
                 SELECT brand_name, generic_name, model_number, product_code, manufacturer_name,
                        pma_pmn_num, udi_di
-                FROM mdr_device WHERE mdr_report_key = ? LIMIT 1
-            """, (str(mdr_report_key),)).fetchone()
+                FROM mdr_device WHERE mdr_report_key = ?
+                ORDER BY id
+            """, (str(mdr_report_key),)).fetchall()
+            first_dev = dev_rows[0] if dev_rows else None
 
             text_rows = conn.execute("""
                 SELECT text_type_code, date_report, foi_text
@@ -975,8 +1008,21 @@ class MDRDatabase:
                 ORDER BY id
             """, (str(mdr_report_key),)).fetchall()
 
-            if not master_row and not dev_row and not text_rows:
+            if not master_row and not dev_rows and not text_rows:
                 return None
+
+            devices = [
+                {
+                    "brand_name": d[0],
+                    "generic_name": d[1],
+                    "model_number": d[2],
+                    "product_code": d[3],
+                    "manufacturer_name": d[4],
+                    "pma_pmn_num": d[5],
+                    "udi_di": d[6],
+                }
+                for d in dev_rows
+            ]
 
             return {
                 "mdr_report_key": str(mdr_report_key),
@@ -987,13 +1033,14 @@ class MDRDatabase:
                 "report_source_code": master_row[4] if master_row else None,
                 "adverse_event_flag": master_row[5] if master_row else None,
                 "product_problem_flag": master_row[6] if master_row else None,
-                "brand_name": dev_row[0] if dev_row else None,
-                "generic_name": dev_row[1] if dev_row else None,
-                "model_number": dev_row[2] if dev_row else None,
-                "product_code": dev_row[3] if dev_row else None,
-                "manufacturer_name": dev_row[4] if dev_row else None,
-                "pma_pmn_num": dev_row[5] if dev_row else None,
-                "udi_di": dev_row[6] if dev_row else None,
+                "brand_name": first_dev[0] if first_dev else None,
+                "generic_name": first_dev[1] if first_dev else None,
+                "model_number": first_dev[2] if first_dev else None,
+                "product_code": first_dev[3] if first_dev else None,
+                "manufacturer_name": first_dev[4] if first_dev else None,
+                "pma_pmn_num": first_dev[5] if first_dev else None,
+                "udi_di": first_dev[6] if first_dev else None,
+                "devices": devices,
                 "narratives": [
                     {"text_type_code": t[0], "date_report": t[1], "foi_text": t[2]}
                     for t in text_rows

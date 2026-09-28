@@ -92,7 +92,7 @@ class DeviceRegistryLinker:
     - FDA Device Listings by Product Code
     """
 
-    RE_PREMARKET = re.compile(r"\b([KkPpDd][0-9]{6}|[Dd][Ee][Nn][0-9]{6}|[Hh][0-9]{6})\b")
+    RE_PREMARKET = re.compile(r"\b([KkPpDd]\s*[0-9]{5,7}|[Dd][Ee][Nn]\s*[0-9]{6,7}|[Hh]\s*[0-9]{5,6})\b")
     RE_MFR_REPORT_NUM = re.compile(r"^\s*([0-9]{7,10})\s*-\s*([0-9]{4})\s*-\s*([0-9]{1,6})\s*$")
     RE_UDI_CLEAN = re.compile(r"[^A-Za-z0-9]")
 
@@ -510,8 +510,20 @@ class DeviceRegistryLinker:
     def _extract_premarket_key(raw_val: Optional[str]) -> Optional[str]:
         if not raw_val:
             return None
-        m = DeviceRegistryLinker.RE_PREMARKET.search(raw_val.strip())
-        return m.group(1).upper() if m else None
+        # Clean out common formatting noise (e.g. revision suffixes "K181234/A1")
+        cleaned = re.sub(r"[\s\-\/].*$", "", raw_val.strip()) if "/" in raw_val else raw_val.strip()
+        cleaned_no_spaces = re.sub(r"\s+", "", cleaned)
+        m = DeviceRegistryLinker.RE_PREMARKET.search(cleaned_no_spaces)
+        if m:
+            key = m.group(1).upper()
+            # If 5-digit K, P, or D number, pad with leading zero to canonical 6-digit FDA standard
+            if key[0] in ("K", "P", "D") and not key.startswith("DEN"):
+                prefix = key[0]
+                digits = key[1:]
+                if len(digits) == 5:
+                    return f"{prefix}0{digits}"
+            return key
+        return None
 
     @staticmethod
     def _extract_report_number_reg_no(report_number: Optional[str]) -> Optional[str]:
@@ -709,6 +721,9 @@ class DeviceRegistryLinker:
             # -----------------------------------------------------------------
             if product_code and brand_name:
                 p_code = product_code.strip().upper()
+                brand_lower = brand_name.lower()
+                b_tokens = {t for t in re.findall(r"[A-Za-z0-9]+", brand_lower) if len(t) > 2}
+
                 candidates = conn.execute("""
                     SELECT listing_number, proprietary_name, firm_name, pmn_number
                     FROM ref_listing WHERE product_code = ?
@@ -718,6 +733,9 @@ class DeviceRegistryLinker:
                 best_sim = 0.0
 
                 for c in candidates:
+                    cand_name = c[1].lower() if c[1] else ""
+                    if b_tokens and not any(t in cand_name for t in b_tokens):
+                        continue
                     sim = self._token_jaccard_similarity(brand_name, c[1])
                     if sim > best_sim:
                         best_sim = sim
@@ -731,6 +749,9 @@ class DeviceRegistryLinker:
 
                 best_pm = None
                 for pm in pm_candidates:
+                    pm_name = pm[1].lower() if pm[1] else ""
+                    if b_tokens and not any(t in pm_name for t in b_tokens):
+                        continue
                     sim = self._token_jaccard_similarity(brand_name, pm[1])
                     if sim > best_sim:
                         best_sim = sim
@@ -978,3 +999,8 @@ class DeviceRegistryLinker:
             }
         finally:
             self._release_connection(conn)
+
+
+# Expose static helper at module level for convenience
+_extract_premarket_key = DeviceRegistryLinker._extract_premarket_key
+

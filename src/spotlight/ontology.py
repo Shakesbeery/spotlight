@@ -91,6 +91,17 @@ class OntologyMatcher:
             "IMDRF_Annex_E": IMDRF_ANNEX_E,
             "IMDRF_Annex_F": IMDRF_ANNEX_F,
         }
+        self._exact_index: Dict[str, List[Tuple[str, str, str]]] = {}
+        for ont_name, records in self.ontologies.items():
+            for item in records:
+                code = item["code"]
+                term = item["term"]
+                synonyms = item.get("synonyms", [])
+                for phrase in [term] + synonyms:
+                    k = phrase.lower().strip()
+                    if k not in self._exact_index:
+                        self._exact_index[k] = []
+                    self._exact_index[k].append((code, term, ont_name))
 
     def _clean_token_set(self, text: str) -> set:
         """Tokenize and remove punctuation/stopwords for similarity calculation."""
@@ -134,6 +145,26 @@ class OntologyMatcher:
         else:
             candidate_ontologies = ["IMDRF_Annex_A", "IMDRF_Annex_C", "IMDRF_Annex_E", "IMDRF_Annex_F"]
 
+        clean_span = span.lower().strip()
+
+        # Fast path 1: Exact match in indexed vocabulary (O(1) lookup)
+        if clean_span in self._exact_index:
+            exact_matches = []
+            seen_exact_codes = set()
+            for code, term, ont_name in self._exact_index[clean_span]:
+                if ont_name in candidate_ontologies and code not in seen_exact_codes:
+                    seen_exact_codes.add(code)
+                    exact_matches.append(
+                        GroundedOntologyTerm(
+                            code=code,
+                            preferred_term=term,
+                            ontology=ont_name,
+                            similarity_score=1.0,
+                        )
+                    )
+            if exact_matches:
+                return exact_matches[:top_k]
+
         matches: List[Tuple[float, GroundedOntologyTerm]] = []
 
         for ont_name in candidate_ontologies:
@@ -150,13 +181,14 @@ class OntologyMatcher:
                 for syn in synonyms:
                     sim = self._compute_similarity(span, syn)
                     if sim > best_sim:
-                        best_sim = syn_sim = sim
+                        best_sim = sim
 
-                # Substring containment bonus
-                clean_span = span.lower()
+                # Substring containment bonus (safe word-boundary guarded)
                 clean_term = term.lower()
                 for target in [clean_term] + [s.lower() for s in synonyms]:
-                    if target in clean_span or clean_span in target:
+                    if target in clean_span:
+                        best_sim = max(best_sim, 0.85)
+                    elif len(clean_span) >= 4 and re.search(rf"\b{re.escape(clean_span)}\b", target):
                         best_sim = max(best_sim, 0.85)
 
                 if best_sim >= threshold:

@@ -105,7 +105,7 @@ class MAUDEExtractionPipeline:
 
         # Step 1: Preprocessing & Boilerplate Stripping
         cleaned_narrative = self.preprocessor.strip_boilerplate(record.narrative_text)
-        segments = self.preprocessor.segment_text(record.narrative_text)
+        segments = self.preprocessor.segment_text(cleaned_narrative, is_cleaned=True)
 
         # Step 2: Fast Triage Tier 1 (ModernBERT / High-speed baseline)
         findings, requires_fallback = self.fast_triage.process_segments(segments)

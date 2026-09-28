@@ -169,7 +169,11 @@ class EntityResolver:
                 # Condition 3: Exact same verbatim span or complete substring containment of same concept
                 is_exact_synonym = (
                     f1.category == f2.category
-                    and (span1 == span2 or (len(span1) > len(span2) and span2 in span1 and len(span2) > 4))
+                    and (
+                        span1 == span2
+                        or (len(span1) > len(span2) and span2 in span1 and len(span2) > 4)
+                        or (len(span2) > len(span1) and span1 in span2 and len(span1) > 4)
+                    )
                     and f1.affected_component == f2.affected_component
                 )
 

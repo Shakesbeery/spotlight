@@ -403,3 +403,58 @@ def test_get_metadata_and_record_lookup():
         assert db.get_metadata("NON-EXISTENT") is None
 
         db.close()
+
+
+def test_multi_device_narrative_deduplication_and_metadata():
+    """Verifies that multi-device reports do not cause Cartesian duplication in narrative text,
+    and that get_metadata returns all devices in the report."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test_multi_dev.db")
+        db = MDRDatabase(db_path=db_path)
+
+        # Setup report with 2 devices and 2 narrative chunks
+        dev_txt = os.path.join(tmpdir, "dev.txt")
+        with open(dev_txt, "w", encoding="latin-1") as f:
+            f.write("MDR_REPORT_KEY|DEVICE_SEQUENCE_NO|BRAND_NAME|DEVICE_REPORT_PRODUCT_CODE|MODEL_NUMBER\n")
+            f.write("MULTI-001|1|Device Main|GAG|MOD-A\n")
+            f.write("MULTI-001|2|Device Secondary|GAG|MOD-B\n")
+
+        txt_txt = os.path.join(tmpdir, "txt.txt")
+        with open(txt_txt, "w", encoding="latin-1") as f:
+            f.write("MDR_REPORT_KEY|MDR_TEXT_KEY|TEXT_TYPE_CODE|FOI_TEXT\n")
+            f.write("MULTI-001|T1|D|Chunk one of event narrative.\n")
+            f.write("MULTI-001|T2|E|Chunk two of manufacturer evaluation.\n")
+
+        mst_txt = os.path.join(tmpdir, "mst.txt")
+        with open(mst_txt, "w", encoding="latin-1") as f:
+            f.write("MDR_REPORT_KEY|EVENT_TYPE|NUMBER_DEVICES_IN_EVENT\n")
+            f.write("MULTI-001|Injury|2\n")
+
+        db.ingest_txt(dev_txt, verbose=False)
+        db.ingest_txt(txt_txt, verbose=False)
+        db.ingest_txt(mst_txt, verbose=False)
+
+        # 1. Verify count_records returns 1 (not duplicated)
+        count = db.count_records(product_codes=["GAG"])
+        assert count == 1
+
+        # 2. Verify stream_records yields 1 record without duplicated narrative
+        records = list(db.stream_records(product_codes=["GAG"]))
+        assert len(records) == 1
+        narrative = records[0].narrative_text
+
+        # Under the old Cartesian join, "Chunk one" and "Chunk two" appeared twice each
+        assert narrative.count("Chunk one of event narrative.") == 1
+        assert narrative.count("Chunk two of manufacturer evaluation.") == 1
+
+        # 3. Verify get_metadata returns all devices
+        meta = db.get_metadata("MULTI-001")
+        assert meta is not None
+        assert "devices" in meta
+        assert len(meta["devices"]) == 2
+        dev_brands = [d["brand_name"] for d in meta["devices"]]
+        assert "Device Main" in dev_brands
+        assert "Device Secondary" in dev_brands
+
+        db.close()
+

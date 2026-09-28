@@ -265,10 +265,7 @@ class SpotlightProject:
         """Tags extraction output with this project's name."""
         if output.project_name == self.name:
             return output
-        # Return shallow copy with project_name set
-        data = output.model_dump()
-        data["project_name"] = self.name
-        return MAUDEExtractionOutput(**data)
+        return output.model_copy(update={"project_name": self.name})
 
     def save_extractions(
         self,

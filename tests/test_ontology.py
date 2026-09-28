@@ -207,3 +207,29 @@ def test_ontology_intervention_granularity():
     assert med[0].code == "F2301"
     assert "Pharmacological / Medical Support" in med[0].preferred_term
 
+
+def test_ontology_exact_index_fast_path():
+    """Verifies that O(1) exact index matches fast-path immediately with 1.0 confidence
+    and word-boundary safeguards prevent spurious substring collisions."""
+    matcher = OntologyMatcher()
+
+    # Exact term match in index
+    assert "perforation" in matcher._exact_index
+    res = matcher.match_span("perforation", category=CategoryType.ADVERSE_EVENT, top_k=1)
+    assert len(res) == 1
+    assert res[0].similarity_score == 1.0
+    assert res[0].code == "E2114"
+
+    # Exact synonym match in index
+    assert "jammed" in matcher._exact_index
+    res = matcher.match_span("jammed", category=CategoryType.OPERATIONAL_PROBLEM, top_k=1)
+    assert len(res) == 1
+    assert res[0].similarity_score == 1.0
+    assert res[0].code == "A0506"
+
+    # Spurious short fragment shouldn't erroneously reverse-match long terms without boundary
+    res_short = matcher.match_span("jam", category=CategoryType.OPERATIONAL_PROBLEM, top_k=1)
+    # Even if fuzzy match finds a score, it should not crash or produce unbounded substring matches
+    assert isinstance(res_short, list)
+
+

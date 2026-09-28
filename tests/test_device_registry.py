@@ -252,3 +252,44 @@ def test_mdr_database_linking_integration(tmp_path, seeded_linker):
     assert links[2][0] == "M3"
     assert links[2][1] == MatchTier.TIER_3_REPORT_NUMBER.value
     assert "Boston Scientific" in links[2][3]
+
+
+def test_premarket_key_normalization(seeded_linker):
+    """Verifies that premarket key normalization handles embedded spaces,
+    supplement/amendment suffixes, and lowercase prefixes."""
+    # Embedded whitespace
+    res_space = seeded_linker.resolve_report(
+        mdr_report_key="R-NORM-01",
+        pma_pmn_num="K 201452",
+        brand_name="Echelon Stapler",
+    )
+    assert res_space.match_tier == MatchTier.TIER_2_PREMARKET
+    assert res_space.is_affirmative is True
+    assert res_space.device.premarket_number == "K201452"
+
+    # Supplement suffix
+    res_supp = seeded_linker.resolve_report(
+        mdr_report_key="R-NORM-02",
+        pma_pmn_num="K201452/S001",
+        brand_name="Echelon Stapler",
+    )
+    assert res_supp.match_tier == MatchTier.TIER_2_PREMARKET
+    assert res_supp.is_affirmative is True
+    assert res_supp.device.premarket_number == "K201452"
+
+    # Lowercase prefix
+    res_lower = seeded_linker.resolve_report(
+        mdr_report_key="R-NORM-03",
+        pma_pmn_num="k201452",
+        brand_name="Echelon Stapler",
+    )
+    assert res_lower.match_tier == MatchTier.TIER_2_PREMARKET
+    assert res_lower.is_affirmative is True
+    assert res_lower.device.premarket_number == "K201452"
+
+    # Direct helper normalization test
+    from spotlight.device_registry import _extract_premarket_key
+    assert _extract_premarket_key("K 12345") == "K012345"  # 5-digit padded
+    assert _extract_premarket_key("DEN 200001") == "DEN200001"
+    assert _extract_premarket_key("P160002/A001") == "P160002"
+
