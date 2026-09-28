@@ -6,7 +6,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Tests](https://img.shields.io/badge/tests-62%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-76%20passed-brightgreen.svg)]()
 [![Throughput](https://img.shields.io/badge/throughput-%7E150%20rec%2Fsec%2Fcore-orange.svg)]()
 [![IMDRF Release](https://img.shields.io/badge/IMDRF-2026%20Harmonized-purple.svg)](https://www.imdrf.org/)
 
@@ -267,28 +267,66 @@ except ProjectMismatchError as e:
 ```
 
 ### 7. Optional Device & Manufacturer Registry Linker (`device_registry`)
-Because raw FDA MDR narratives and voluntary reports frequently contain typos, trade names, or colloquial terms, associating a report with an official FDA-registered device and legal manufacturer can be ambiguous. Spotlight includes a dedicated, completely optional **4-tier waterfall resolution engine** (`DeviceRegistryLinker`):
+
+#### The Challenge: Why Associating MAUDE Reports to Official Registries is Non-Trivial
+Associating raw adverse event reports with an officially registered medical device and legal manufacturer in FDA MAUDE is complicated by the structure of historical postmarket surveillance:
+1. **Unstructured Brand Mentions**: In raw MDR files (`DEVICE.txt`), the `BRAND_NAME`, `GENERIC_NAME`, and `MANUFACTURER_D_NAME` columns are free-form text entered by reporters. These frequently contain colloquial abbreviations, misspellings, trade model rebrandings, or omissions.
+2. **Voluntary vs. Mandatory Reporting**: MedWatch 3500 voluntary reports (filed by physicians, biomedical engineers, or patients) and 3500A user facility reports (filed by hospitals) rarely contain premarket clearance numbers (`PMA_PMN_NUM`).
+3. **Corporate Entity vs. Legal Establishment Disconnect**: The brand-level manufacturer listed on a report often corresponds to a commercial subsidiary, sales distributor, or parent holding corporation rather than the legal firm registered with the FDA under 21 CFR Part 807.
+
+#### The Solution: The 3 Affirmative Regulatory Keys
+While text-only brand matching is ambiguous, manufacturer-submitted adverse events (which comprise over 90% of modern MAUDE reports) carry statutory, deterministic identifiers:
+- **Affirmative Key 1: UDI-DI (AccessGUDID Barcode DI)**: Under 21 CFR Part 830, devices carry a Global Unique Device Identifier. The Device Identifier (`UDI-DI`) barcode is a 1-to-1 deterministic foreign key into the FDA AccessGUDID database, identifying the exact catalog number, model, version, and legal labeler DUNS / FEI numbers.
+- **Affirmative Key 2: Premarket Clearance / Approval Number (`PMA_PMN_NUM`)**: 510(k) (`K######`), PMA (`P######`), De Novo (`DEN######`), or HDE (`H######`) numbers map 1-to-1 to FDA premarket registries, establishing the legal applicant firm and cleared proprietary trade name.
+- **Affirmative Key 3: 21 CFR § 803.52 3-Segment Manufacturer Report Number (`REPORT_NUMBER`)**: FDA federal reporting regulations require all manufacturer-submitted reports to adhere to the strict 3-segment format:
+  $$\text{REPORT\_NUMBER} = [\text{Registration/FEI Number}] - [\text{4-Digit Year}] - [\text{Sequence Number}]$$
+  The 7-to-10 digit prefix is the manufacturer's official FDA Establishment Registration Number / FEI in the FDA Registration and Listing System (RLS).
+
+Spotlight implements a **4-tier waterfall resolution engine** (`DeviceRegistryLinker`) that leverages these affirmative regulatory keys before falling back to constrained heuristics:
 
 ```mermaid
 flowchart TD
     Start["Raw MDR Report"] --> Step1{"Tier 1: UDI-DI present?"}
-    Step1 -- Yes --> GUDID["AccessGUDID Match<br/>(100% Deterministic: Model + Labeler DUNS/FEI)"]
+    Step1 -- Yes --> GUDID["Tier 1: AccessGUDID Barcode Match<br/>(100% Deterministic: Model + Labeler DUNS/FEI)"]
     Step1 -- No --> Step2{"Tier 2: Premarket Number present?<br/>(K######, P######, DEN######)"}
     
-    Step2 -- Yes --> Premarket["FDA 510(k) / PMA Registry<br/>(100% Deterministic: Cleared Applicant + Trade Name)"]
+    Step2 -- Yes --> Premarket["Tier 2: FDA 510(k) / PMA Registry<br/>(100% Deterministic: Cleared Applicant + Trade Name)"]
     Step2 -- No --> Step3{"Tier 3: Manufacturer Report Number?<br/>(21 CFR § 803.52 3-segment syntax)"}
     
-    Step3 -- Yes --> RegEst["FDA Establishment Registration (RLS)<br/>(100% Deterministic: Firm Name + Address + FEI)"]
+    Step3 -- Yes --> RegEst["Tier 3: FDA Establishment Registration (RLS)<br/>(100% Deterministic: Firm Name + Address + FEI)"]
     Step3 -- No --> Step4["Tier 4: Product Code Constrained Fallback<br/>(Token similarity against listed devices)"]
+    Step4 -- Match >= 0.40 --> ListedDev["Probabilistic Listing Resolution"]
+    Step4 -- No Match --> Unres["Unresolved"]
 ```
+
+#### Waterfall Resolution Tiers
+
+| Tier | Resolution Method | Primary Regulatory Key | Deterministic / Affirmative? | Confidence Score | Entity Resolved |
+| :--- | :--- | :--- | :---: | :---: | :--- |
+| **Tier 1** | AccessGUDID Barcode | `UDI-DI` (GTIN / HIBC) | **Yes** (`True`) | **`1.00`** | Exact Model, Catalog No., Labeler DUNS & FEI |
+| **Tier 2** | Premarket Registry | `PMA_PMN_NUM` (`K#`, `P#`, `DEN#`) | **Yes** (`True`) | **`1.00`** | Cleared Trade Name, Applicant Firm & Decision Date |
+| **Tier 3** | Establishment RLS | `REPORT_NUMBER` (§ 803.52 Prefix) | **Yes** (`True`) | **`1.00`** | Registered Manufacturing Facility, FEI & Address |
+| **Tier 4** | Listing Heuristic | `product_code` + Word Tokens | No (`False`) | `0.40` – `0.95` | Closest FDA Listed Proprietary Name & Firm |
+| **Unresolved** | No Match Found | None | No (`False`) | `0.00` | Safely returned without hallucinated entities |
+
+#### Completely Optional & Zero Forced Overhead
+- **Pure Standard Library + Pydantic**: No heavy external dependencies or external web requests are required.
+- **Embedded & Persistent Modes**: Runs fully in-memory (`DeviceRegistryLinker()`) or against a persistent local SQLite file (`DeviceRegistryLinker("data/registry.db")`).
+- **Instant Offline Evaluation**: Call `linker.seed_mock_registry()` to instantly pre-seed major FDA registrations across interventional cardiology, surgical devices, and orthopedics for fast local prototyping and testing without downloading gigabytes of FDA bulk tables.
+- **Official FDA Master Ingestion**: For full offline coverage, ingest official FDA FOIA flat files via:
+  - `linker.ingest_establishment_file("foirl/establishment.txt")`
+  - `linker.ingest_pmn_file("pmn96cur.txt")`
+  - `linker.ingest_pma_file("pma.txt")`
+  - `linker.ingest_gudid_file("device.txt")`
+- **Non-Destructive Database Linking**: `linker.link_mdr_database(mdr_db)` writes resolution results into a separate `report_registry_links` table in your MDR database, keeping raw FDA flat file tables completely untouched.
 
 #### Python Usage
 ```python
-from spotlight import DeviceRegistryLinker, MatchTier
+from spotlight import DeviceRegistryLinker, MatchTier, MDRDatabase
 
 # 1. Initialize linker (runs in-memory or on persistent SQLite)
 linker = DeviceRegistryLinker()
-linker.seed_mock_registry()  # Or ingest official FDA flat files: linker.ingest_establishment_file(...)
+linker.seed_mock_registry()  # Or ingest official FDA flat files
 
 # 2. Resolve a report carrying a UDI-DI (Tier 1: Deterministic)
 res1 = linker.resolve_report(
@@ -297,17 +335,19 @@ res1 = linker.resolve_report(
     brand_name="Endocutter 60",
 )
 print(res1.match_tier)          # MatchTier.TIER_1_UDI
-print(res1.is_affirmative)      # True (100% deterministic)
+print(res1.is_affirmative)      # True
+print(res1.confidence_score)    # 1.0
 print(res1.manufacturer.name)   # "Ethicon Endo-Surgery, LLC"
 print(res1.device.listing_number) # "D201452"
 
-# 3. Resolve a report carrying a 510(k) / PMA number (Tier 2: Deterministic)
+# 3. Resolve a report carrying a 510(k) or PMA clearance number (Tier 2: Deterministic)
 res2 = linker.resolve_report(
     mdr_report_key="R-200",
     pma_pmn_num="P160002",
     brand_name="Coronary Stent",
 )
 print(res2.match_tier)          # MatchTier.TIER_2_PREMARKET
+print(res2.is_affirmative)      # True
 print(res2.manufacturer.name)   # "Medtronic Vascular"
 print(res2.device.proprietary_name) # "Resolute Onyx Zotarolimus-Eluting Coronary Stent System"
 
@@ -317,10 +357,16 @@ res3 = linker.resolve_report(
     report_number="2183427-2024-00192",  # 2183427 is Medtronic Vascular FEI/Registration No.
 )
 print(res3.match_tier)          # MatchTier.TIER_3_REPORT_NUMBER
+print(res3.is_affirmative)      # True
 print(res3.manufacturer.name)   # "Medtronic Vascular"
+print(res3.notes)               # "Affirmatively matched FDA Establishment Registration Number 2183427..."
 
-# 5. Batch resolve an entire local MDR database (non-destructive)
-# Saves results into a dedicated 'report_registry_links' table
+# 5. Resolve on demand from a raw metadata dictionary
+meta = db.get_metadata("R-100")
+res = linker.resolve_from_metadata(meta)
+
+# 6. Non-destructively batch link an entire MDR database
+# Annotates the database by populating the 'report_registry_links' table
 stats = linker.link_mdr_database(db, verbose=True)
 print(f"Affirmative matches: {stats['affirmative_matches']:,} / {stats['total_records_analyzed']:,}")
 ```
@@ -384,6 +430,20 @@ spotlight project stats surgical_staplers
 
 # 5. Export compiled project findings to CSV or Parquet for Vigipy
 spotlight project export surgical_staplers -o staplers_vigipy.csv
+```
+
+### Resolve Device & Manufacturer Registrations (`spotlight registry`)
+```bash
+# 1. View registered reference statistics (in-memory or SQLite)
+spotlight registry stats --seed
+
+# 2. Test waterfall resolution for a specific report or clearance number
+spotlight registry resolve --seed --udi-di 00884521034812 --brand "Endocutter 60"
+spotlight registry resolve --seed --pma-pmn P160002 --json
+spotlight registry resolve --seed --report-num "2183427-2024-00192"
+
+# 3. Non-destructively annotate an MDR database with official registration matches
+spotlight registry link --db data/maude.db --seed
 ```
 
 ### Check Installed Version
@@ -490,7 +550,7 @@ pytest tests/ -v
 - **Fast-Path Latency**: **5.8 ms – 19.4 ms** per narrative.
 - **Throughput**: **100 – 150 records / second / core**.
 - **Memory Overhead**: < 150 MB peak resident set size.
-- **Test Suite**: **62 passing tests** covering preprocessing, token triage, component linkage, acronym reconciliation, ontology disambiguation, openFDA fetching, MDR database delta ingestion, durable extraction store, metadata lookups, Vigipy bridge, and CLI commands.
+- **Test Suite**: **76 passing tests** covering preprocessing, token triage, component linkage, acronym reconciliation, ontology disambiguation, openFDA fetching, MDR database delta ingestion, durable extraction store, metadata lookups, project workspace isolation, device registry waterfall resolution, affirmative key matching, Vigipy bridge, and CLI commands.
 
 ---
 

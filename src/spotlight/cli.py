@@ -275,6 +275,78 @@ def handle_project(args):
             p.close()
 
 
+def handle_registry(args):
+    from spotlight.device_registry import DeviceRegistryLinker
+    from spotlight.mdr_database import MDRDatabase
+
+    if not getattr(args, "reg_action", None):
+        print("Please specify a registry action: stats, link, resolve. Run 'spotlight registry --help' for details.")
+        return
+
+    linker = DeviceRegistryLinker(db_path=getattr(args, "registry_db", None))
+    if getattr(args, "seed", False):
+        linker.seed_mock_registry()
+
+    try:
+        if args.reg_action == "stats":
+            st = linker.stats()
+            print(f"Device Registry Database Statistics (db={linker.db_path}):")
+            print(f"  Establishment Registrations: {st['establishments']:,}")
+            print(f"  Premarket Submissions:       {st['premarket_submissions']:,}")
+            print(f"  AccessGUDID Records:         {st['gudid_records']:,}")
+            print(f"  Device Listings:             {st['device_listings']:,}")
+
+        elif args.reg_action == "resolve":
+            res = linker.resolve_report(
+                mdr_report_key=args.mdr_key or "CLI-001",
+                report_number=args.report_num,
+                pma_pmn_num=args.pma_pmn,
+                udi_di=args.udi_di,
+                brand_name=args.brand,
+                product_code=args.product_code,
+            )
+            if getattr(args, "json", False):
+                print(json.dumps(res.model_dump(), indent=2))
+            else:
+                print("=" * 70)
+                print(f"DEVICE RESOLUTION RESULT: {res.mdr_report_key}")
+                print("=" * 70)
+                print(f"  Match Tier:        {res.match_tier.value}")
+                print(f"  Is Affirmative:    {res.is_affirmative}")
+                print(f"  Confidence Score:  {res.confidence_score:.2f}")
+                if res.manufacturer:
+                    print(f"  Manufacturer:      {res.manufacturer.name}")
+                    if res.manufacturer.registration_number:
+                        print(f"    - Reg Number:    {res.manufacturer.registration_number}")
+                    if res.manufacturer.fei_number:
+                        print(f"    - FEI:           {res.manufacturer.fei_number}")
+                if res.device:
+                    print(f"  Resolved Device:   {res.device.proprietary_name or 'N/A'}")
+                    if res.device.premarket_number:
+                        print(f"    - Premarket No:  {res.device.premarket_number} ({res.device.premarket_type or 'Cleared'})")
+                    if res.device.udi_di:
+                        print(f"    - UDI-DI:        {res.device.udi_di}")
+                    if res.device.listing_number:
+                        print(f"    - Listing No:    {res.device.listing_number}")
+                if res.notes:
+                    print(f"  Notes:             {res.notes}")
+                print("=" * 70)
+
+        elif args.reg_action == "link":
+            mdr_db = MDRDatabase(db_path=args.db)
+            try:
+                linker.link_mdr_database(
+                    mdr_db=mdr_db,
+                    limit=args.limit,
+                    verbose=True,
+                )
+            finally:
+                mdr_db.close()
+    finally:
+        linker.close()
+
+
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -377,6 +449,34 @@ def main():
     p_pexport.add_argument("--product-code", default=None, help="Optional product code filter")
     p_pexport.add_argument("--brand-name", default=None, help="Optional brand name filter")
 
+    # Command: registry
+    p_reg = subparsers.add_parser("registry", help="Optional FDA device & manufacturer registry resolution")
+    reg_sub = p_reg.add_subparsers(dest="reg_action", help="Registry actions")
+
+    # registry stats
+    p_rstats = reg_sub.add_parser("stats", help="Display record counts in reference registry database")
+    p_rstats.add_argument("--registry-db", default=None, help="Path to registry SQLite database (default: in-memory)")
+    p_rstats.add_argument("--seed", action="store_true", help="Pre-seed mock registry for instant offline testing")
+
+    # registry resolve
+    p_rresolve = reg_sub.add_parser("resolve", help="Test waterfall resolution for specific identifiers")
+    p_rresolve.add_argument("--mdr-key", default="CLI-001", help="Target MDR Report Key")
+    p_rresolve.add_argument("--report-num", default=None, help="21 CFR § 803 3-segment report number (e.g. 2183427-2024-00192)")
+    p_rresolve.add_argument("--pma-pmn", default=None, help="510(k), PMA, or De Novo clearance number (e.g. K201452, P160002)")
+    p_rresolve.add_argument("--udi-di", default=None, help="AccessGUDID device identifier barcode (e.g. 00884521034812)")
+    p_rresolve.add_argument("--brand", default=None, help="Reported device brand/trade name")
+    p_rresolve.add_argument("--product-code", default=None, help="FDA 3-letter product code (e.g. GAG)")
+    p_rresolve.add_argument("--registry-db", default=None, help="Path to registry SQLite database (default: in-memory)")
+    p_rresolve.add_argument("--seed", action="store_true", help="Pre-seed mock registry for instant offline testing")
+    p_rresolve.add_argument("--json", action="store_true", help="Output full JSON resolution object")
+
+    # registry link
+    p_rlink = reg_sub.add_parser("link", help="Non-destructively link MDR database reports to official FDA registrations")
+    p_rlink.add_argument("--db", default="data/mdr.db", help="Path to target MDR SQLite database to annotate")
+    p_rlink.add_argument("--registry-db", default=None, help="Path to registry SQLite database (default: in-memory)")
+    p_rlink.add_argument("--seed", action="store_true", help="Pre-seed mock registry for instant offline testing")
+    p_rlink.add_argument("--limit", type=int, default=None, help="Maximum number of records to process")
+
     # Command: version
     p_ver = subparsers.add_parser("version", help="Show installed Spotlight version")
 
@@ -398,6 +498,11 @@ def main():
             p_proj.print_help()
         else:
             handle_project(args)
+    elif args.command == "registry":
+        if not args.reg_action:
+            p_reg.print_help()
+        else:
+            handle_registry(args)
     elif args.command == "version":
         handle_version(args)
     else:

@@ -175,3 +175,64 @@ def test_cli_project(tmp_path, capsys):
     assert "Exported Vigipy dataset to:" in captured.out
     assert (base_dir / "cardiac_study" / "exports" / "cardiac.csv").exists()
 
+
+def test_cli_registry(tmp_path, capsys):
+    from spotlight.mdr_database import MDRDatabase
+
+    # 1. Test registry stats with seed
+    with patch("sys.argv", ["spotlight", "registry", "stats", "--seed"]):
+        main()
+    captured = capsys.readouterr()
+    assert "Device Registry Database Statistics" in captured.out
+    assert "Establishment Registrations:" in captured.out
+    assert "Premarket Submissions:" in captured.out
+
+    # 2. Test registry resolve (text output)
+    with patch("sys.argv", [
+        "spotlight", "registry", "resolve",
+        "--seed",
+        "--udi-di", "00884521034812",
+        "--brand", "Endocutter 60",
+    ]):
+        main()
+    captured = capsys.readouterr()
+    assert "DEVICE RESOLUTION RESULT:" in captured.out
+    assert "Match Tier:        tier_1_udi" in captured.out
+    assert "Is Affirmative:    True" in captured.out
+    assert "Ethicon Endo-Surgery" in captured.out
+
+    # 3. Test registry resolve (JSON output)
+    with patch("sys.argv", [
+        "spotlight", "registry", "resolve",
+        "--seed",
+        "--pma-pmn", "P160002",
+        "--json",
+    ]):
+        main()
+    captured = capsys.readouterr()
+    data = json.loads(captured.out)
+    assert data["match_tier"] == "tier_2_premarket"
+    assert data["is_affirmative"] is True
+    assert "Medtronic Vascular" in data["manufacturer"]["name"]
+
+    # 4. Test registry link on local MDR database
+    mdr_file = tmp_path / "test_link.db"
+    mdr_db = MDRDatabase(db_path=str(mdr_file))
+
+    master_txt = tmp_path / "mdrfoi_test.txt"
+    master_txt.write_text("MDR_REPORT_KEY|REPORT_NUMBER|EVENT_TYPE\n101|2183427-2024-0001|Injury\n", encoding="latin-1")
+    dev_txt = tmp_path / "device_test.txt"
+    dev_txt.write_text("MDR_REPORT_KEY|BRAND_NAME|PMA_PMN_NUM\n101|Onyx Stent|P160002\n", encoding="latin-1")
+
+    mdr_db.ingest_txt(str(master_txt), verbose=False)
+    mdr_db.ingest_txt(str(dev_txt), verbose=False)
+    mdr_db.close()
+
+    with patch("sys.argv", ["spotlight", "registry", "link", "--db", str(mdr_file), "--seed"]):
+        main()
+    captured = capsys.readouterr()
+    assert "SPOTLIGHT DEVICE & MANUFACTURER REGISTRY LINK SUMMARY" in captured.out
+    assert "Total Reports Analyzed: 1" in captured.out
+    assert "Affirmative Matches:    1" in captured.out
+
+
