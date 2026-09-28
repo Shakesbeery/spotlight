@@ -106,6 +106,85 @@ def handle_version(args):
     print(f"Spotlight FDA MAUDE NLP System v{__version__}")
 
 
+def handle_mdr(args):
+    from spotlight.mdr_database import MDRDatabase, MDRCatalog
+    db = MDRDatabase(db_path=args.db)
+
+    try:
+        if args.mdr_action == "sync":
+            years = args.years
+            if years and years != "recent" and years != "all":
+                try:
+                    years = [int(y.strip()) for y in years.split(",")]
+                except ValueError:
+                    pass
+            print(f"Syncing MDR flat files into {args.db} (years={years})...")
+            stats = db.sync(years=years, download_dir=args.download_dir, verbose=True)
+            print("\nSync completed successfully! Current database stats:")
+            print(json.dumps(stats, indent=2))
+
+        elif args.mdr_action == "stats":
+            stats = db.stats()
+            print(f"Database Statistics for: {args.db}")
+            print(f"  Master Reports:    {stats['master_reports']:,}")
+            print(f"  Device Records:    {stats['device_records']:,}")
+            print(f"  Narrative Chunks:  {stats['narrative_chunks']:,}")
+            if stats["top_product_codes"]:
+                print("\nTop 10 Product Codes in Database:")
+                for pcode, cnt in stats["top_product_codes"].items():
+                    print(f"  - {pcode}: {cnt:,} reports")
+            if stats["top_brand_names"]:
+                print("\nTop 10 Brand Names in Database:")
+                for brand, cnt in stats["top_brand_names"].items():
+                    print(f"  - {brand}: {cnt:,} reports")
+
+            ext_stats = db.get_extraction_stats()
+            print(f"\nDurable Extraction Store Statistics:")
+            print(f"  Total Extracted Reports: {ext_stats['total_reports_extracted']:,}")
+            print(f"  Total Findings Saved:    {ext_stats['total_findings_saved']:,}")
+            if ext_stats["findings_by_category"]:
+                print("  Findings by Category:")
+                for cat, cnt in ext_stats["findings_by_category"].items():
+                    print(f"    - {cat}: {cnt:,}")
+            if ext_stats["top_imdrf_codes"]:
+                print("  Top IMDRF Codes:")
+                for code_info in ext_stats["top_imdrf_codes"]:
+                    print(f"    - [{code_info['code']}] {code_info['term']}: {code_info['count']:,}")
+
+        elif args.mdr_action == "query":
+            only_unextracted = getattr(args, "unextracted_only", False)
+            records = db.query_records(
+                product_code=args.product_code,
+                brand_name=args.brand_name,
+                event_type=args.event_type,
+                query=args.query,
+                only_unextracted=only_unextracted,
+                limit=args.limit,
+            )
+            unextracted_label = " (Unextracted Delta Only)" if only_unextracted else ""
+            print(f"Found {len(records)} records matching query{unextracted_label} in {args.db}:")
+            for i, r in enumerate(records, 1):
+                print(f"\n[{i}] MDR Key: {r.mdr_report_key} | Product: {r.brand_name} ({r.product_code}) | Event: {r.event_type}")
+                preview = r.narrative_text[:180] + "..." if len(r.narrative_text) > 180 else r.narrative_text
+                print(f"    Narrative: \"{preview}\"")
+
+        elif args.mdr_action == "extract":
+            skip_already_extracted = not getattr(args, "force", False)
+            db.orchestrate_pipeline(
+                product_code=args.product_code,
+                brand_name=args.brand_name,
+                event_type=args.event_type,
+                query=args.query,
+                limit=args.limit,
+                chunk_size=args.chunk_size,
+                skip_already_extracted=skip_already_extracted,
+                verbose=True,
+            )
+    finally:
+        db.close()
+
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="spotlight",
@@ -131,6 +210,41 @@ def main():
     p_fetch.add_argument("--dir", default="data", help="Output directory")
     p_fetch.add_argument("-o", "--output", default="fetched_records.json", help="Output filename")
 
+    # Command: mdr
+    p_mdr = subparsers.add_parser("mdr", help="Manage direct FDA MAUDE flat files database")
+    mdr_sub = p_mdr.add_subparsers(dest="mdr_action", help="MDR Database actions")
+
+    # mdr sync
+    p_sync = mdr_sub.add_parser("sync", help="Download and ingest FDA MDR flat files into SQLite")
+    p_sync.add_argument("--years", default="recent", help="Years to sync: 'recent', 'all', or comma-separated e.g. '2023,2024,2025'")
+    p_sync.add_argument("--db", default="data/mdr.db", help="Path to SQLite database file")
+    p_sync.add_argument("--download-dir", default="data/mdr_downloads", help="Directory for temporary archive downloads")
+
+    # mdr stats
+    p_stats = mdr_sub.add_parser("stats", help="Display record counts and device statistics from database")
+    p_stats.add_argument("--db", default="data/mdr.db", help="Path to SQLite database file")
+
+    # mdr query
+    p_query = mdr_sub.add_parser("query", help="Query device reports directly from local database")
+    p_query.add_argument("--db", default="data/mdr.db", help="Path to SQLite database file")
+    p_query.add_argument("--product-code", default=None, help="FDA 3-letter product code (e.g. GAG)")
+    p_query.add_argument("--brand-name", default=None, help="Device brand name filter")
+    p_query.add_argument("--event-type", default=None, help="Event type (Malfunction, Injury, Death)")
+    p_query.add_argument("--query", default=None, help="Narrative text keyword search")
+    p_query.add_argument("--unextracted-only", action="store_true", help="Only return delta records not yet in extraction store")
+    p_query.add_argument("--limit", type=int, default=10, help="Max records to return")
+
+    # mdr extract
+    p_mdr_extract = mdr_sub.add_parser("extract", help="Orchestrate streaming extraction pipeline on MDR database")
+    p_mdr_extract.add_argument("--db", default="data/mdr.db", help="Path to SQLite database file")
+    p_mdr_extract.add_argument("--product-code", default=None, help="FDA 3-letter product code (e.g. GAG)")
+    p_mdr_extract.add_argument("--brand-name", default=None, help="Device brand name filter")
+    p_mdr_extract.add_argument("--event-type", default=None, help="Event type (Malfunction, Injury, Death)")
+    p_mdr_extract.add_argument("--query", default=None, help="Narrative text keyword search")
+    p_mdr_extract.add_argument("--limit", type=int, default=None, help="Max records to extract")
+    p_mdr_extract.add_argument("--chunk-size", type=int, default=500, help="Batch size for streaming extraction & database commit")
+    p_mdr_extract.add_argument("--force", action="store_true", help="Re-extract records even if previously extracted")
+
     # Command: version
     p_ver = subparsers.add_parser("version", help="Show installed Spotlight version")
 
@@ -142,6 +256,11 @@ def main():
         handle_batch(args)
     elif args.command == "fetch":
         handle_fetch(args)
+    elif args.command == "mdr":
+        if not args.mdr_action:
+            p_mdr.print_help()
+        else:
+            handle_mdr(args)
     elif args.command == "version":
         handle_version(args)
     else:

@@ -66,6 +66,11 @@ pip install -e ".[dev]"
 pip install -e ".[llm]"
 ```
 
+### With Vigipy Disproportionality Surveillance Integration
+```bash
+pip install -e ".[vigipy]"
+```
+
 ---
 
 ## Quickstart (Python API)
@@ -118,9 +123,34 @@ results = spotlight.extract_batch(narratives)
 
 for i, res in enumerate(results, 1):
     print(f"Report {i}: Processed in {res.processing_time_ms:.2f} ms via {res.execution_path.value}")
+### 3. Disproportionality Surveillance with Vigipy
+Spotlight natively bridges into [Vigipy](https://github.com/Shakesbeery/vigipy) (v3.0+) for multi-device signal detection:
+
+```python
+import spotlight
+from spotlight import to_vigipy_df, to_vigipy_container, run_disproportionality_scan
+import vigipy
+
+# 1. Process batch of device records
+outputs = spotlight.extract_batch(records)
+
+# 2. Convert to transaction DataFrame or typed DataContainer
+df = to_vigipy_df(outputs, product_key="brand_name", target_level="code_term")
+container = to_vigipy_container(outputs, product_key="brand_name", margin_threshold=1)
+
+# 3. One-line disproportionality scan across frequentist & Bayesian algorithms
+results = run_disproportionality_scan(outputs, methods=["prr", "ror", "bcpnn", "gps"])
+
+print("PRR Signals:", results["prr"].num_signals)
+print("ROR Signals:", results["ror"].num_signals)
+
+# 4. Multivariable LASSO Analysis with Sparse Binary Matrices
+binary_container = to_vigipy_container(outputs, binary=True, sparse=True)
+lasso_res = vigipy.lasso(binary_container, min_events=1, relaxed=True)
+print(lasso_res.all_signals[["Product", "Adverse Event", "Count", "aROR", "CI Lower", "CI Upper"]])
 ```
 
-### 3. Fetching Real-World Data from openFDA
+### 4. Fetching Real-World Data from openFDA
 ```python
 from spotlight import MAUDEDataFetcher, SpotlightExtractor
 
@@ -137,6 +167,45 @@ extractor = SpotlightExtractor()
 outputs = extractor.process_batch(records)
 
 print(f"Successfully processed {len(outputs)} real FDA records.")
+```
+
+### 5. Managing Direct FDA MAUDE Flat Files Database (`mdr_database`)
+If you require the entire historical MDR dataset or large multi-year cohorts beyond the 25k openFDA API ceiling:
+
+```python
+import spotlight
+from spotlight import MDRDatabase, init_mdr_database
+
+# 1. Initialize or sync local database directly from FDA ftparea
+db = init_mdr_database(
+    db_path="data/maude.db",
+    years=[2024, 2025],  # or "recent", or "all"
+    sync=True,           # Downloads, extracts ZIPs, and ingests pipe-delimited files
+)
+
+# 2. Check database statistics (master reports, devices, and durable extraction store)
+stats = db.stats()
+print(f"Total Master Reports: {stats['master_reports']:,}")
+print(f"Total Device Records: {stats['device_records']:,}")
+
+# 3. Stream millions of joined records in constant memory (<100MB RAM)
+# Tip: event_type=None (or "all") returns all event types (Malfunctions, Injuries, Deaths)
+for record in db.stream_records(product_code="GAG", event_type=None, limit=1000):
+    output = spotlight.extract(record)
+
+# 4. Orchestrate an automated Query -> Extract -> Save delta pipeline
+# Automatically anti-joins against previously saved extractions so only unextracted delta records are processed!
+run_stats = db.orchestrate_pipeline(
+    product_code="GAG",
+    event_type=None,         # Processes all event types
+    chunk_size=500,          # Streams & commits in memory-constant 500-record batches
+    skip_already_extracted=True,  # Zero redundant compute on re-runs!
+)
+print(f"Newly Extracted: {run_stats.newly_extracted:,} | Saved: {run_stats.total_findings_saved:,}")
+
+# 5. Compile stored results directly into Vigipy for disproportionality scanning
+vdf = db.to_vigipy_df(product_code="GAG", target_level="code_term")
+container = db.to_vigipy_container(product_code="GAG", binary=True)
 ```
 
 ---
@@ -160,9 +229,25 @@ spotlight extract "Balloon burst under pressure." --json
 spotlight batch input_records.json -o extracted_findings.json
 ```
 
-### Fetch Live FDA Reports
+### Fetch Live FDA Reports from openFDA API
 ```bash
 spotlight fetch --limit 20 --event-type Malfunction -o live_malfunctions.json
+```
+
+### Manage Offline FDA MDR Flat Files Database & Durable Pipeline
+```bash
+# Download and ingest recent years into local SQLite database
+spotlight mdr sync --years 2024,2025 --db data/maude.db
+
+# Inspect database contents and durable extraction store statistics
+spotlight mdr stats --db data/maude.db
+
+# Query records directly (with optional delta filter)
+spotlight mdr query --product-code GAG --limit 10 --db data/maude.db
+spotlight mdr query --product-code GAG --unextracted-only --db data/maude.db
+
+# Orchestrate streaming extraction & save to durable store (skipping previously processed)
+spotlight mdr extract --product-code GAG --event-type all --db data/maude.db
 ```
 
 ### Check Installed Version

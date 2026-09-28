@@ -5,7 +5,7 @@ Ontology Grounding, and final synthesis.
 """
 
 import time
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Generator, Any
 from spotlight.schemas import (
     MAUDERecordInput,
     MAUDEExtractionOutput,
@@ -135,6 +135,9 @@ class MAUDEExtractionPipeline:
 
         return MAUDEExtractionOutput(
             mdr_report_key=record.mdr_report_key,
+            brand_name=record.brand_name,
+            product_code=record.product_code,
+            event_type=record.event_type,
             operational_problems=bucketed[CategoryType.OPERATIONAL_PROBLEM],
             manufacturing_issues=bucketed[CategoryType.MANUFACTURING_ISSUE],
             adverse_events=bucketed[CategoryType.ADVERSE_EVENT],
@@ -166,7 +169,7 @@ class MAUDEExtractionPipeline:
         return self.process_record(record)
 
     def process_batch(
-        self, records: List[Union[str, MAUDERecordInput]]
+        self, records: Any
     ) -> List[MAUDEExtractionOutput]:
         """Processes a batch of records (raw strings or MAUDERecordInput instances)."""
         outputs = []
@@ -176,6 +179,19 @@ class MAUDEExtractionPipeline:
             else:
                 outputs.append(self.process_record(r))
         return outputs
+
+    def process_stream(
+        self, records: Any
+    ) -> Generator[MAUDEExtractionOutput, None, None]:
+        """
+        Lazily processes and streams extraction outputs one by one.
+        Maintains constant memory overhead (<100MB) even across millions of records.
+        """
+        for r in records:
+            if isinstance(r, str):
+                yield self.process_narrative(r)
+            else:
+                yield self.process_record(r)
 
 
 # Ergonomic public alias for library users

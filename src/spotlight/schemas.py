@@ -73,6 +73,9 @@ class MAUDERecordInput(BaseModel):
 class MAUDEExtractionOutput(BaseModel):
     """Complete extraction result for a MAUDE record."""
     mdr_report_key: str = Field(..., description="Report identifier")
+    brand_name: Optional[str] = Field(None, description="Trade/Brand name of device")
+    product_code: Optional[str] = Field(None, description="FDA 3-letter product code (e.g., DQX, KRC)")
+    event_type: Optional[str] = Field(None, description="FDA event type: Malfunction, Injury, Death, Other")
     operational_problems: List[ExtractedFinding] = Field(
         default_factory=list,
         description="Modes of failure affecting the device during normal operation"

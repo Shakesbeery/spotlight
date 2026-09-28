@@ -47,6 +47,14 @@ dev = [
 llm = [
     "requests>=2.28.0",
 ]
+vigipy = [
+    "pandas>=2.0.0",
+    "vigipy>=3.0.0",
+]
+analytics = [
+    "pandas>=2.0.0",
+    "vigipy>=3.0.0",
+]
 
 [project.scripts]
 spotlight = "spotlight.cli:main"

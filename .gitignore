@@ -30,4 +30,8 @@ Thumbs.db
 data/*.zip
 data/raw_*
 data/partitions/
+data/mdr_downloads/
+*.db
+*.sqlite
+*.sqlite3
 *.log

@@ -4,7 +4,7 @@ Specialized for operational device problems, manufacturing/pre-use defects, clin
 and health impact interventions with granular IMDRF (Annexes A, C, E, F) and MedDRA ontology grounding.
 """
 
-from typing import Union, List, Optional
+from typing import Union, List, Optional, Generator, Any
 from spotlight.schemas import (
     CategoryType,
     TemporalTiming,
@@ -20,6 +20,21 @@ from spotlight.ontology import OntologyMatcher
 from spotlight.fast_triage import FastTriageEngine
 from spotlight.component_linker import ComponentLinker, EntityResolver
 from spotlight.data_fetcher import MAUDEDataFetcher
+from spotlight.vigipy_bridge import (
+    to_vigipy_df,
+    to_vigipy_container,
+    run_disproportionality_scan,
+)
+from spotlight.mdr_database import (
+    MDRDatabase,
+    MDRCatalog,
+    MDRDownloader,
+    MDRParser,
+    init_mdr_database,
+    ExtractionStore,
+    MDROrchestrator,
+    PipelineRunStats,
+)
 
 __version__ = "0.2.0"
 
@@ -62,7 +77,7 @@ def extract(
 
 
 def extract_batch(
-    records: List[Union[str, MAUDERecordInput]]
+    records: Any
 ) -> List[MAUDEExtractionOutput]:
     """
     Processes a batch of narratives or records with high throughput.
@@ -75,10 +90,27 @@ def extract_batch(
     return extractor.process_batch(records)
 
 
+def extract_stream(
+    records: Any
+) -> Generator[MAUDEExtractionOutput, None, None]:
+    """
+    Lazily streams extraction outputs one by one with constant memory (<100MB RAM).
+    Ideal for massive query results or processing millions of records from disk.
+
+    Example:
+        >>> import spotlight
+        >>> for output in spotlight.extract_stream(large_record_generator):
+        ...     print(output.mdr_report_key)
+    """
+    extractor = get_default_extractor()
+    return extractor.process_stream(records)
+
+
 __all__ = [
     "__version__",
     "extract",
     "extract_batch",
+    "extract_stream",
     "get_default_extractor",
     "SpotlightExtractor",
     "MAUDEExtractionPipeline",
@@ -95,4 +127,15 @@ __all__ = [
     "ComponentLinker",
     "EntityResolver",
     "MAUDEDataFetcher",
+    "to_vigipy_df",
+    "to_vigipy_container",
+    "run_disproportionality_scan",
+    "MDRDatabase",
+    "MDRCatalog",
+    "MDRDownloader",
+    "MDRParser",
+    "init_mdr_database",
+    "ExtractionStore",
+    "MDROrchestrator",
+    "PipelineRunStats",
 ]
