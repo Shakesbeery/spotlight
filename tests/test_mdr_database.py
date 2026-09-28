@@ -356,3 +356,50 @@ def test_sync_delta_skipping_already_ingested_files():
         assert rows3 == 1
 
         db.close()
+
+
+def test_get_metadata_and_record_lookup():
+    """Verifies looking up raw MDR metadata and records from extraction keys."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test_lookup.db")
+        db = MDRDatabase(db_path=db_path)
+
+        dev_txt = os.path.join(tmpdir, "dev.txt")
+        with open(dev_txt, "w", encoding="latin-1") as f:
+            f.write("MDR_REPORT_KEY|BRAND_NAME|DEVICE_REPORT_PRODUCT_CODE|MODEL_NUMBER\nKEY-77|AcuStaple|GAG|MOD-99\n")
+        txt_txt = os.path.join(tmpdir, "txt.txt")
+        with open(txt_txt, "w", encoding="latin-1") as f:
+            f.write("MDR_REPORT_KEY|TEXT_TYPE_CODE|DATE_REPORT|FOI_TEXT\nKEY-77|D|2024-03-01|Stapler locked up.\nKEY-77|E|2024-03-15|Lab confirmed anvil crack.\n")
+        mst_txt = os.path.join(tmpdir, "mst.txt")
+        with open(mst_txt, "w", encoding="latin-1") as f:
+            f.write("MDR_REPORT_KEY|EVENT_TYPE|DATE_RECEIVED|DATE_OF_EVENT|REPORT_SOURCE_CODE\nKEY-77|Injury|2024-03-05|2024-02-28|U\n")
+
+        db.ingest_txt(dev_txt, verbose=False)
+        db.ingest_txt(txt_txt, verbose=False)
+        db.ingest_txt(mst_txt, verbose=False)
+
+        # 1. get_record
+        rec = db.get_record("KEY-77")
+        assert rec is not None
+        assert rec.mdr_report_key == "KEY-77"
+        assert rec.brand_name == "AcuStaple"
+        assert rec.event_type == "Injury"
+        assert "Stapler locked up." in rec.narrative_text
+        assert "Lab confirmed anvil crack." in rec.narrative_text
+
+        # 2. get_metadata
+        meta = db.get_metadata("KEY-77")
+        assert meta is not None
+        assert meta["mdr_report_key"] == "KEY-77"
+        assert meta["date_of_event"] == "2024-02-28"
+        assert meta["report_source_code"] == "U"
+        assert meta["model_number"] == "MOD-99"
+        assert len(meta["narratives"]) == 2
+        assert meta["narratives"][0]["text_type_code"] == "D"
+        assert meta["narratives"][1]["text_type_code"] == "E"
+
+        # 3. non-existent
+        assert db.get_record("NON-EXISTENT") is None
+        assert db.get_metadata("NON-EXISTENT") is None
+
+        db.close()

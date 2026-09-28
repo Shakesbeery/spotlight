@@ -6,7 +6,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Tests](https://img.shields.io/badge/tests-61%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-62%20passed-brightgreen.svg)]()
 [![Throughput](https://img.shields.io/badge/throughput-%7E150%20rec%2Fsec%2Fcore-orange.svg)]()
 [![IMDRF Release](https://img.shields.io/badge/IMDRF-2026%20Harmonized-purple.svg)](https://www.imdrf.org/)
 
@@ -358,7 +358,7 @@ pytest tests/ -v
 - **Fast-Path Latency**: **5.8 ms – 19.4 ms** per narrative.
 - **Throughput**: **100 – 150 records / second / core**.
 - **Memory Overhead**: < 150 MB peak resident set size.
-- **Test Suite**: **61 passing tests** covering preprocessing, token triage, component linkage, acronym reconciliation, ontology disambiguation, openFDA fetching, MDR database delta ingestion, durable extraction store, Vigipy bridge, and CLI commands.
+- **Test Suite**: **62 passing tests** covering preprocessing, token triage, component linkage, acronym reconciliation, ontology disambiguation, openFDA fetching, MDR database delta ingestion, durable extraction store, metadata lookups, Vigipy bridge, and CLI commands.
 
 ---
 

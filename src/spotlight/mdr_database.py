@@ -749,11 +749,22 @@ class MDRDatabase:
         brand_name: Optional[str] = None,
         event_type: Optional[str] = None,
         query: Optional[str] = None,
+        mdr_report_key: Optional[str] = None,
+        mdr_report_keys: Optional[Sequence[str]] = None,
         only_unextracted: bool = False,
     ) -> Tuple[str, str, List[Any]]:
         """Constructs WHERE clauses and JOINs for raw record querying."""
         where_clauses = ["t.foi_text IS NOT NULL", "t.foi_text != ''"]
         params: List[Any] = []
+
+        if mdr_report_key:
+            where_clauses.append("d.mdr_report_key = ?")
+            params.append(str(mdr_report_key).strip())
+
+        if mdr_report_keys:
+            placeholders = ",".join("?" for _ in mdr_report_keys)
+            where_clauses.append(f"d.mdr_report_key IN ({placeholders})")
+            params.extend([str(k).strip() for k in mdr_report_keys])
 
         if product_code:
             where_clauses.append("UPPER(d.product_code) = ?")
@@ -785,6 +796,8 @@ class MDRDatabase:
         brand_name: Optional[str] = None,
         event_type: Optional[str] = None,
         query: Optional[str] = None,
+        mdr_report_key: Optional[str] = None,
+        mdr_report_keys: Optional[Sequence[str]] = None,
         only_unextracted: bool = False,
     ) -> int:
         """Counts distinct reports matching criteria."""
@@ -793,6 +806,8 @@ class MDRDatabase:
             brand_name=brand_name,
             event_type=event_type,
             query=query,
+            mdr_report_key=mdr_report_key,
+            mdr_report_keys=mdr_report_keys,
             only_unextracted=only_unextracted,
         )
         sql = f"""
@@ -816,6 +831,8 @@ class MDRDatabase:
         brand_name: Optional[str] = None,
         event_type: Optional[str] = None,
         query: Optional[str] = None,
+        mdr_report_key: Optional[str] = None,
+        mdr_report_keys: Optional[Sequence[str]] = None,
         only_unextracted: bool = False,
         limit: Optional[int] = None,
         chunk_size: int = 2000,
@@ -830,6 +847,8 @@ class MDRDatabase:
             brand_name=brand_name,
             event_type=event_type,
             query=query,
+            mdr_report_key=mdr_report_key,
+            mdr_report_keys=mdr_report_keys,
             only_unextracted=only_unextracted,
         )
 
@@ -885,6 +904,8 @@ class MDRDatabase:
         brand_name: Optional[str] = None,
         event_type: Optional[str] = None,
         query: Optional[str] = None,
+        mdr_report_key: Optional[str] = None,
+        mdr_report_keys: Optional[Sequence[str]] = None,
         only_unextracted: bool = False,
         limit: int = 100,
     ) -> List[MAUDERecordInput]:
@@ -894,9 +915,64 @@ class MDRDatabase:
             brand_name=brand_name,
             event_type=event_type,
             query=query,
+            mdr_report_key=mdr_report_key,
+            mdr_report_keys=mdr_report_keys,
             only_unextracted=only_unextracted,
             limit=limit,
         ))
+
+    def get_record(self, mdr_report_key: str) -> Optional[MAUDERecordInput]:
+        """Looks up a single MAUDERecordInput by its report key."""
+        records = self.query_records(mdr_report_key=mdr_report_key, limit=1)
+        return records[0] if records else None
+
+    def get_metadata(self, mdr_report_key: str) -> Optional[Dict[str, Any]]:
+        """
+        Looks up full raw MDR relational metadata for a specific report key.
+        Returns dictionary with master event details, device specifications, and raw narrative chunks.
+        """
+        conn = self._get_connection()
+        try:
+            master_row = conn.execute("""
+                SELECT event_type, date_received, date_of_event, report_source_code,
+                       adverse_event_flag, product_problem_flag
+                FROM mdr_master WHERE mdr_report_key = ? LIMIT 1
+            """, (str(mdr_report_key),)).fetchone()
+
+            dev_row = conn.execute("""
+                SELECT brand_name, generic_name, model_number, product_code, manufacturer_name
+                FROM mdr_device WHERE mdr_report_key = ? LIMIT 1
+            """, (str(mdr_report_key),)).fetchone()
+
+            text_rows = conn.execute("""
+                SELECT text_type_code, date_report, foi_text
+                FROM mdr_text WHERE mdr_report_key = ?
+                ORDER BY id
+            """, (str(mdr_report_key),)).fetchall()
+
+            if not master_row and not dev_row and not text_rows:
+                return None
+
+            return {
+                "mdr_report_key": str(mdr_report_key),
+                "event_type": master_row[0] if master_row else "Unknown",
+                "date_received": master_row[1] if master_row else None,
+                "date_of_event": master_row[2] if master_row else None,
+                "report_source_code": master_row[3] if master_row else None,
+                "adverse_event_flag": master_row[4] if master_row else None,
+                "product_problem_flag": master_row[5] if master_row else None,
+                "brand_name": dev_row[0] if dev_row else None,
+                "generic_name": dev_row[1] if dev_row else None,
+                "model_number": dev_row[2] if dev_row else None,
+                "product_code": dev_row[3] if dev_row else None,
+                "manufacturer_name": dev_row[4] if dev_row else None,
+                "narratives": [
+                    {"text_type_code": t[0], "date_report": t[1], "foi_text": t[2]}
+                    for t in text_rows
+                ],
+            }
+        finally:
+            conn.close()
 
     # =========================================================================
     # DURABLE EXTRACTION STORAGE
