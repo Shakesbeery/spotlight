@@ -456,6 +456,7 @@ class MDRDatabase:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS mdr_master (
                     mdr_report_key TEXT PRIMARY KEY,
+                    report_number TEXT,
                     event_type TEXT,
                     date_received TEXT,
                     date_of_event TEXT,
@@ -474,9 +475,24 @@ class MDRDatabase:
                     generic_name TEXT,
                     model_number TEXT,
                     product_code TEXT,
-                    manufacturer_name TEXT
+                    manufacturer_name TEXT,
+                    pma_pmn_num TEXT,
+                    udi_di TEXT
                 )
             """)
+
+            # Check and run column migrations if existing database tables lack newer linkage keys
+            try:
+                cols_m = [c[1] for c in conn.execute("PRAGMA table_info(mdr_master)").fetchall()]
+                if "report_number" not in cols_m:
+                    conn.execute("ALTER TABLE mdr_master ADD COLUMN report_number TEXT")
+                cols_d = [c[1] for c in conn.execute("PRAGMA table_info(mdr_device)").fetchall()]
+                if "pma_pmn_num" not in cols_d:
+                    conn.execute("ALTER TABLE mdr_device ADD COLUMN pma_pmn_num TEXT")
+                if "udi_di" not in cols_d:
+                    conn.execute("ALTER TABLE mdr_device ADD COLUMN udi_di TEXT")
+            except Exception:
+                pass
 
             # 3. Narrative Text Table
             conn.execute("""
@@ -600,12 +616,14 @@ class MDRDatabase:
                             row.get("MODEL_NUMBER", ""),
                             row.get("DEVICE_REPORT_PRODUCT_CODE", row.get("PRODUCT_CODE", "")),
                             row.get("MANUFACTURER_D_NAME", ""),
+                            row.get("PMA_PMN_NUM", ""),
+                            row.get("UDI-DI", row.get("UDI_DI", row.get("UDI-PUBLIC", row.get("UDI_PUBLIC", "")))),
                         )
                         for row in batch if row.get("MDR_REPORT_KEY")
                     ]
                     conn.executemany("""
-                        INSERT INTO mdr_device (mdr_report_key, brand_name, generic_name, model_number, product_code, manufacturer_name)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        INSERT INTO mdr_device (mdr_report_key, brand_name, generic_name, model_number, product_code, manufacturer_name, pma_pmn_num, udi_di)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, records)
 
                 elif file_type == "foitext":
@@ -627,6 +645,7 @@ class MDRDatabase:
                     records = [
                         (
                             row.get("MDR_REPORT_KEY", ""),
+                            row.get("REPORT_NUMBER", ""),
                             row.get("EVENT_TYPE", "Unknown"),
                             row.get("DATE_RECEIVED", ""),
                             row.get("DATE_OF_EVENT", ""),
@@ -638,9 +657,9 @@ class MDRDatabase:
                     ]
                     conn.executemany("""
                         INSERT OR REPLACE INTO mdr_master (
-                            mdr_report_key, event_type, date_received, date_of_event,
+                            mdr_report_key, report_number, event_type, date_received, date_of_event,
                             report_source_code, adverse_event_flag, product_problem_flag
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, records)
 
                 conn.commit()
@@ -939,13 +958,14 @@ class MDRDatabase:
         conn = self._get_connection()
         try:
             master_row = conn.execute("""
-                SELECT event_type, date_received, date_of_event, report_source_code,
+                SELECT report_number, event_type, date_received, date_of_event, report_source_code,
                        adverse_event_flag, product_problem_flag
                 FROM mdr_master WHERE mdr_report_key = ? LIMIT 1
             """, (str(mdr_report_key),)).fetchone()
 
             dev_row = conn.execute("""
-                SELECT brand_name, generic_name, model_number, product_code, manufacturer_name
+                SELECT brand_name, generic_name, model_number, product_code, manufacturer_name,
+                       pma_pmn_num, udi_di
                 FROM mdr_device WHERE mdr_report_key = ? LIMIT 1
             """, (str(mdr_report_key),)).fetchone()
 
@@ -960,17 +980,20 @@ class MDRDatabase:
 
             return {
                 "mdr_report_key": str(mdr_report_key),
-                "event_type": master_row[0] if master_row else "Unknown",
-                "date_received": master_row[1] if master_row else None,
-                "date_of_event": master_row[2] if master_row else None,
-                "report_source_code": master_row[3] if master_row else None,
-                "adverse_event_flag": master_row[4] if master_row else None,
-                "product_problem_flag": master_row[5] if master_row else None,
+                "report_number": master_row[0] if master_row else None,
+                "event_type": master_row[1] if master_row else "Unknown",
+                "date_received": master_row[2] if master_row else None,
+                "date_of_event": master_row[3] if master_row else None,
+                "report_source_code": master_row[4] if master_row else None,
+                "adverse_event_flag": master_row[5] if master_row else None,
+                "product_problem_flag": master_row[6] if master_row else None,
                 "brand_name": dev_row[0] if dev_row else None,
                 "generic_name": dev_row[1] if dev_row else None,
                 "model_number": dev_row[2] if dev_row else None,
                 "product_code": dev_row[3] if dev_row else None,
                 "manufacturer_name": dev_row[4] if dev_row else None,
+                "pma_pmn_num": dev_row[5] if dev_row else None,
+                "udi_di": dev_row[6] if dev_row else None,
                 "narratives": [
                     {"text_type_code": t[0], "date_report": t[1], "foi_text": t[2]}
                     for t in text_rows

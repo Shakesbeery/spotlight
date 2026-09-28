@@ -266,6 +266,65 @@ except ProjectMismatchError as e:
     print("Contamination prevented!")
 ```
 
+### 7. Optional Device & Manufacturer Registry Linker (`device_registry`)
+Because raw FDA MDR narratives and voluntary reports frequently contain typos, trade names, or colloquial terms, associating a report with an official FDA-registered device and legal manufacturer can be ambiguous. Spotlight includes a dedicated, completely optional **4-tier waterfall resolution engine** (`DeviceRegistryLinker`):
+
+```mermaid
+flowchart TD
+    Start["Raw MDR Report"] --> Step1{"Tier 1: UDI-DI present?"}
+    Step1 -- Yes --> GUDID["AccessGUDID Match<br/>(100% Deterministic: Model + Labeler DUNS/FEI)"]
+    Step1 -- No --> Step2{"Tier 2: Premarket Number present?<br/>(K######, P######, DEN######)"}
+    
+    Step2 -- Yes --> Premarket["FDA 510(k) / PMA Registry<br/>(100% Deterministic: Cleared Applicant + Trade Name)"]
+    Step2 -- No --> Step3{"Tier 3: Manufacturer Report Number?<br/>(21 CFR § 803.52 3-segment syntax)"}
+    
+    Step3 -- Yes --> RegEst["FDA Establishment Registration (RLS)<br/>(100% Deterministic: Firm Name + Address + FEI)"]
+    Step3 -- No --> Step4["Tier 4: Product Code Constrained Fallback<br/>(Token similarity against listed devices)"]
+```
+
+#### Python Usage
+```python
+from spotlight import DeviceRegistryLinker, MatchTier
+
+# 1. Initialize linker (runs in-memory or on persistent SQLite)
+linker = DeviceRegistryLinker()
+linker.seed_mock_registry()  # Or ingest official FDA flat files: linker.ingest_establishment_file(...)
+
+# 2. Resolve a report carrying a UDI-DI (Tier 1: Deterministic)
+res1 = linker.resolve_report(
+    mdr_report_key="R-100",
+    udi_di="00884521034812",
+    brand_name="Endocutter 60",
+)
+print(res1.match_tier)          # MatchTier.TIER_1_UDI
+print(res1.is_affirmative)      # True (100% deterministic)
+print(res1.manufacturer.name)   # "Ethicon Endo-Surgery, LLC"
+print(res1.device.listing_number) # "D201452"
+
+# 3. Resolve a report carrying a 510(k) / PMA number (Tier 2: Deterministic)
+res2 = linker.resolve_report(
+    mdr_report_key="R-200",
+    pma_pmn_num="P160002",
+    brand_name="Coronary Stent",
+)
+print(res2.match_tier)          # MatchTier.TIER_2_PREMARKET
+print(res2.manufacturer.name)   # "Medtronic Vascular"
+print(res2.device.proprietary_name) # "Resolute Onyx Zotarolimus-Eluting Coronary Stent System"
+
+# 4. Resolve a report via 21 CFR § 803.52 Report Number (Tier 3: Deterministic)
+res3 = linker.resolve_report(
+    mdr_report_key="R-300",
+    report_number="2183427-2024-00192",  # 2183427 is Medtronic Vascular FEI/Registration No.
+)
+print(res3.match_tier)          # MatchTier.TIER_3_REPORT_NUMBER
+print(res3.manufacturer.name)   # "Medtronic Vascular"
+
+# 5. Batch resolve an entire local MDR database (non-destructive)
+# Saves results into a dedicated 'report_registry_links' table
+stats = linker.link_mdr_database(db, verbose=True)
+print(f"Affirmative matches: {stats['affirmative_matches']:,} / {stats['total_records_analyzed']:,}")
+```
+
 ---
 
 ## Command-Line Interface (CLI)

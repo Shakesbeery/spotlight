@@ -42,6 +42,13 @@ from spotlight.project import (
     ProjectNotFoundError,
     ProjectActiveConflictError,
 )
+from spotlight.device_registry import (
+    DeviceRegistryLinker,
+    MatchTier,
+    RegisteredManufacturer,
+    RegisteredDevice,
+    DeviceResolutionResult,
+)
 
 __version__ = "0.2.0"
 
@@ -150,4 +157,9 @@ __all__ = [
     "ProjectMismatchError",
     "ProjectNotFoundError",
     "ProjectActiveConflictError",
+    "DeviceRegistryLinker",
+    "MatchTier",
+    "RegisteredManufacturer",
+    "RegisteredDevice",
+    "DeviceResolutionResult",
 ]
